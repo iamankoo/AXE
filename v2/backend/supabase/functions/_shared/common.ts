@@ -15,6 +15,11 @@ export const SCREENSHOT_BUCKET = "payment-screenshots";
 export const PENDING_TTL_MS = 24 * 60 * 60 * 1000;
 /** How long a decided request's result (no personal data) stays available to the client. */
 export const PICKUP_TTL_MS = 24 * 60 * 60 * 1000;
+/**
+ * Once the Windows client has read a decided result, the result stub is kept at most this much longer in case the
+ * client never acknowledges (crash, lost connection). Normally the client's acknowledgement deletes it at once.
+ */
+export const RESULT_GRACE_MS = 15 * 60 * 1000;
 
 export function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {

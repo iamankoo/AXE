@@ -20,6 +20,15 @@ public enum AccessPhase
     Offline,
 }
 
+public static class AccessPhaseExtensions
+{
+    /// <summary>
+    /// The one rule that decides whether the browser may be used: only an authorized, unexpired session.
+    /// Every other phase (no config, checking, needs access, pending, offline) keeps the browser hidden.
+    /// </summary>
+    public static bool AllowsBrowsing(this AccessPhase phase) => phase == AccessPhase.Active;
+}
+
 /// <summary>
 /// Drives timed access: request → admin decision → signed grant → trusted timer → expiry.
 /// <para>
@@ -30,13 +39,14 @@ public enum AccessPhase
 /// </summary>
 public sealed class AccessController : IDisposable
 {
-    private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(4);
+    private static readonly TimeSpan DefaultPollInterval = TimeSpan.FromSeconds(4);
     private static readonly TimeSpan MaxPollBackoff = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan ResyncInterval = TimeSpan.FromMinutes(5);
 
     private readonly AccessClient? _client;
     private readonly AccessStore _store;
-    private readonly TrustedClock _clock = new();
+    private readonly TrustedClock _clock;
+    private readonly TimeSpan _pollInterval;
     private readonly DispatcherTimer _tick;
     private AccessState _state = new();
     private GrantClaims? _grant;
@@ -46,9 +56,17 @@ public sealed class AccessController : IDisposable
     private bool _disposed;
 
     public AccessController(AccessConfig? config, AccessStore store)
+        : this(config is null ? null : new AccessClient(config), store)
+    {
+    }
+
+    /// <summary>Test seam: inject the client (with a fake transport), the monotonic clock source and the poll interval.</summary>
+    internal AccessController(AccessClient? client, AccessStore store, Func<long>? monotonicMs = null, TimeSpan? pollInterval = null)
     {
         _store = store;
-        _client = config is null ? null : new AccessClient(config);
+        _client = client;
+        _clock = new TrustedClock(monotonicMs);
+        _pollInterval = pollInterval ?? DefaultPollInterval;
         _tick = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(1) };
         _tick.Tick += (_, _) => OnTick();
         SystemEvents.PowerModeChanged += OnPowerModeChanged;
@@ -251,7 +269,7 @@ public sealed class AccessController : IDisposable
                 }
 
                 failures++;
-                delay = TimeSpan.FromSeconds(Math.Min(MaxPollBackoff.TotalSeconds, PollInterval.TotalSeconds * Math.Pow(2, Math.Min(failures, 3))));
+                delay = TimeSpan.FromSeconds(Math.Min(MaxPollBackoff.TotalSeconds, _pollInterval.TotalSeconds * Math.Pow(2, Math.Min(failures, 3))));
                 continue;
             }
 
@@ -268,12 +286,13 @@ public sealed class AccessController : IDisposable
                 case "rejected":
                     Log.Info("Access request rejected by the admin.");
                     await ClearPendingAsync("Your request was not approved. Check the details and try again.");
+                    _ = AcknowledgeResultAsync(id, poll);
                     return;
                 case "expired":
                     await ClearPendingAsync("Your request wasn't reviewed in time. Please submit it again.");
                     return;
                 default:
-                    delay = PollInterval;
+                    delay = _pollInterval;
                     break;
             }
         }
@@ -296,10 +315,33 @@ public sealed class AccessController : IDisposable
 
         _clock.Sync(status.ServerNow);
         _lastResync = DateTime.UtcNow;
+        var pollToken = _state.PendingPollToken;
         _state = new AccessState { Grant = status.Grant };
         await SaveAsync();
         Log.Info("Access approved.");
         ActivateGrant(claims);
+
+        // Only now that the grant is safely stored: let the server delete its result stub.
+        if (pollToken is not null)
+        {
+            _ = AcknowledgeResultAsync(requestId, pollToken);
+        }
+    }
+
+    /// <summary>
+    /// Best effort: if this fails the server removes the stub itself shortly after its first read, so a failure
+    /// never affects access. It is deliberately sent only after the result has been saved (or the rejection handled).
+    /// </summary>
+    private async Task AcknowledgeResultAsync(string requestId, string pollToken)
+    {
+        try
+        {
+            await Client.AcknowledgeAsync(requestId, pollToken, CancellationToken.None);
+        }
+        catch (AccessException ex)
+        {
+            Log.Warn($"Result acknowledgement failed ({ex.Kind}); the server removes it shortly anyway.");
+        }
     }
 
     private async Task ClearPendingAsync(string message)
@@ -314,10 +356,15 @@ public sealed class AccessController : IDisposable
     private GrantClaims VerifyGrant(string? grant, string device, string? expectedRequestId)
     {
         var claims = _client!.Verifier.Verify<GrantClaims>(grant, "axe-grant", c => c.Type);
+        var plan = AccessPlan.Find(claims.Plan);
         if (!string.Equals(claims.DeviceHash, device, StringComparison.Ordinal)
             || (expectedRequestId is not null && claims.RequestId != expectedRequestId)
+            || string.IsNullOrEmpty(claims.Id)
             || claims.ExpiresAt <= claims.IssuedAt
-            || AccessPlan.Find(claims.Plan) is null)
+            || plan is null
+            // The server sets the duration from the plan at approval time; a grant whose length does not match
+            // its own plan is not one this server issued.
+            || claims.ExpiresAt - claims.IssuedAt != (long)plan.Hours * 3_600_000)
         {
             throw new AccessException(AccessErrorKind.Untrusted, "Authorization does not belong to this PC.");
         }
@@ -341,7 +388,7 @@ public sealed class AccessController : IDisposable
         Tick?.Invoke(this, Remaining);
     }
 
-    private void OnTick()
+    internal void OnTick()
     {
         if (_grant is null)
         {
@@ -365,7 +412,7 @@ public sealed class AccessController : IDisposable
     }
 
     /// <summary>Re-reads the server clock; also ends access that the admin revoked.</summary>
-    private async Task ResyncAsync()
+    internal async Task ResyncAsync()
     {
         if (_resyncing || _grant is null || _state.Grant is null)
         {

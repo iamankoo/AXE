@@ -320,6 +320,10 @@ async function submitInvite(name) {
 
 const inAdminList = async (id) => (await adminCall("GET", "/requests")).body.requests.some((r) => r.id === id);
 const HOURS_24 = 24 * 3600_000;
+const RESULT_GRACE = 15 * 60_000; // must match RESULT_GRACE_MS in _shared/common.ts
+
+/** The Windows client's acknowledgement: DELETE with the poll secret once the result is stored. */
+const ack = (requestId, pollToken) => call("DELETE", `${base}/requests/${requestId}`, null, { "x-poll-token": pollToken });
 
 test("lifecycle: approval clears all request data at once, delivers the grant, and the stub is deleted on pickup", async () => {
   const { requestId, pollToken } = await submitPayment("Test Lifecycle Approve");
@@ -352,14 +356,20 @@ test("lifecycle: approval clears all request data at once, delivers the grant, a
   assert.equal(status.status, "approved");
   const grant = verified(status.grant, "axe-grant");
 
-  // Pickup deletes the request row entirely; only the ACTIVE authorization remains.
-  assert.deepEqual(await rows("access_requests", `id=eq.${requestId}`), [], "request record is gone after pickup");
+  // Reading the result does not delete it (so a lost response can be retried) but caps how long it may linger.
+  const [readStub] = await rows("access_requests", `id=eq.${requestId}`);
+  assert.equal(readStub.status, "approved");
+  assert.ok(new Date(readStub.expires_at).getTime() <= Date.now() + RESULT_GRACE + 5000, "an unacknowledged stub is capped after its first read");
+
+  // The client acknowledges after storing the grant: the stub is deleted at once; only the ACTIVE authorization remains.
+  assert.equal((await ack(requestId, pollToken)).status, 200);
+  assert.deepEqual(await rows("access_requests", `id=eq.${requestId}`), [], "request record is gone after the acknowledged pickup");
   const grants = await rows("access_grants", `request_id=eq.${requestId}`);
   assert.equal(grants.length, 1, "the active authorization is retained");
   assert.equal(grants[0].jti, grant.jti);
   assert.equal((await session(status.grant)).valid, true, "the grant still validates without the request row");
 
-  // The result is delivered once; nothing is recreated by asking again.
+  // Once acknowledged, nothing is recreated by asking again.
   assert.equal((await call("GET", `${base}/requests/${requestId}?nonce=${nonce()}`, null, { "x-poll-token": pollToken })).status, 404);
   assert.deepEqual(await rows("access_requests", `id=eq.${requestId}`), []);
   assert.equal(await inAdminList(requestId), false);
@@ -383,7 +393,8 @@ test("lifecycle: rejection clears all request data, delivers the rejection, then
   assert.equal(status.status, "rejected", "the rejection reaches the Windows client");
   assert.equal(status.grant, null);
 
-  assert.deepEqual(await rows("access_requests", `id=eq.${requestId}`), [], "request record is gone after pickup");
+  assert.equal((await ack(requestId, pollToken)).status, 200);
+  assert.deepEqual(await rows("access_requests", `id=eq.${requestId}`), [], "request record is gone after the acknowledged pickup");
   assert.deepEqual(await rows("access_grants", `request_id=eq.${requestId}`), [], "a rejection never creates an authorization");
 });
 
@@ -398,6 +409,7 @@ test("lifecycle: invitation requests follow the same lifecycle", async () => {
   assert.equal(stub.name, null);
 
   assert.equal((await poll(requestId, pollToken)).status, "approved");
+  await ack(requestId, pollToken);
   assert.deepEqual(await rows("access_requests", `id=eq.${requestId}`), []);
 });
 
@@ -422,6 +434,8 @@ test("lifecycle: repeating or racing decisions can never recreate history or ext
   const done = await submitPayment("Test Repeat Approve");
   await adminCall("POST", `/requests/${done.requestId}/decision`, { decision: "approve" });
   await poll(done.requestId, done.pollToken);
+  assert.equal((await adminCall("POST", `/requests/${done.requestId}/decision`, { decision: "approve" })).status, 409, "409 even before the acknowledgement");
+  await ack(done.requestId, done.pollToken);
   assert.equal((await adminCall("POST", `/requests/${done.requestId}/decision`, { decision: "approve" })).status, 409);
   assert.equal((await adminCall("POST", `/requests/${done.requestId}/decision`, { decision: "reject" })).status, 409);
   assert.deepEqual(await rows("access_requests", `id=eq.${done.requestId}`), []);
@@ -431,6 +445,7 @@ test("lifecycle: repeating or racing decisions can never recreate history or ext
   const rejected = await submitPayment("Test Reject Then Approve");
   await adminCall("POST", `/requests/${rejected.requestId}/decision`, { decision: "reject" });
   await poll(rejected.requestId, rejected.pollToken);
+  await ack(rejected.requestId, rejected.pollToken);
   assert.equal((await adminCall("POST", `/requests/${rejected.requestId}/decision`, { decision: "approve" })).status, 409);
   assert.deepEqual(await rows("access_grants", `request_id=eq.${rejected.requestId}`), []);
 
@@ -443,6 +458,7 @@ test("lifecycle: repeating or racing decisions can never recreate history or ext
   assert.deepEqual(results.map((r) => r.status).sort(), [200, 409]);
   assert.equal((await rows("access_grants", `request_id=eq.${raced.requestId}`)).length, 1);
   await poll(raced.requestId, raced.pollToken);
+  await ack(raced.requestId, raced.pollToken);
   assert.deepEqual(await rows("access_requests", `id=eq.${raced.requestId}`), []);
 });
 
@@ -469,4 +485,170 @@ test("lifecycle: failed or refused decisions delete nothing", async () => {
   await call("DELETE", `${base}/requests/${requestId}`, null, { "x-poll-token": pollToken });
   assert.deepEqual(await rows("access_requests", `id=eq.${requestId}`), []);
   assert.equal((await storedScreenshots(requestId)).length, 0, "withdrawing also deletes the screenshot");
+});
+
+// ---------------------------------------------------------------------------------------------------
+// PHASE 3: authorization lifecycle, reliable result delivery, expiry and grant security.
+// ---------------------------------------------------------------------------------------------------
+
+async function patchRows(table, filter, values) {
+  const res = await fetch(`${service().url}/rest/v1/${table}?${filter}`, {
+    method: "PATCH", headers: { ...serviceHeaders(), Prefer: "return=minimal" }, body: JSON.stringify(values),
+  });
+  assert.ok(res.status < 300, `patching ${table}: ${res.status}`);
+}
+
+async function submitInviteFor(plan, dev = device()) {
+  const res = await call("POST", `${base}/requests`, { kind: "invite", name: `Test Plan ${plan}`, plan, code: "PAPAJI500", device: dev });
+  assert.equal(res.status, 201, JSON.stringify(res.body));
+  return { ...res.body, dev };
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+test("phase3 delivery: a lost response is recoverable, the same signed approval is returned until acknowledged", async () => {
+  const { requestId, pollToken, dev } = await submitInviteFor("5h");
+  await adminCall("POST", `/requests/${requestId}/decision`, { decision: "approve" });
+
+  const first = await poll(requestId, pollToken);   // pretend this response never reached the client
+  const second = await poll(requestId, pollToken);  // the client retries
+  assert.equal(first.status, "approved");
+  assert.equal(second.status, "approved");
+  assert.equal(second.grant, first.grant, "the retry receives the very same signed grant");
+  assert.equal(verified(second.grant, "axe-grant").did, dev);
+
+  assert.equal((await ack(requestId, pollToken)).status, 200);
+  assert.equal((await ack(requestId, pollToken)).status, 200, "acknowledging twice is harmless");
+  assert.deepEqual(await rows("access_requests", `id=eq.${requestId}`), []);
+  assert.equal((await call("GET", `${base}/requests/${requestId}?nonce=${nonce()}`, null, { "x-poll-token": pollToken })).status, 404,
+    "after the acknowledgement the result is gone");
+  assert.equal((await session(second.grant)).valid, true, "the authorization itself lives on");
+});
+
+test("phase3 delivery: a rejection is also repeatable until acknowledged", async () => {
+  const { requestId, pollToken } = await submitInviteFor("1h");
+  await adminCall("POST", `/requests/${requestId}/decision`, { decision: "reject" });
+  assert.equal((await poll(requestId, pollToken)).status, "rejected");
+  assert.equal((await poll(requestId, pollToken)).status, "rejected");
+  await ack(requestId, pollToken);
+  assert.deepEqual(await rows("access_requests", `id=eq.${requestId}`), []);
+});
+
+test("phase3 delivery: only the poll-secret holder can acknowledge; unknown ids are harmless", async () => {
+  const { requestId, pollToken } = await submitInviteFor("1h");
+  await adminCall("POST", `/requests/${requestId}/decision`, { decision: "approve" });
+
+  const wrong = await ack(requestId, "x".repeat(43));
+  assert.equal(wrong.status, 200, "no information is leaked about whether the id exists");
+  assert.equal((await rows("access_requests", `id=eq.${requestId}`)).length, 1, "a wrong secret deletes nothing");
+  assert.equal((await ack(randomUUIDish(), pollToken)).status, 200);
+  assert.equal((await rows("access_requests", `id=eq.${requestId}`)).length, 1);
+
+  await ack(requestId, pollToken);
+  assert.deepEqual(await rows("access_requests", `id=eq.${requestId}`), []);
+});
+
+function randomUUIDish() {
+  const h = randomBytes(16).toString("hex");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
+}
+
+test("phase3 delivery: a result that is never acknowledged cannot linger, the expiry cleanup deletes it", { timeout: 120_000 }, async () => {
+  const { requestId, pollToken } = await submitInviteFor("5h");
+  await adminCall("POST", `/requests/${requestId}/decision`, { decision: "approve" });
+  const grantToken = (await poll(requestId, pollToken)).grant;
+
+  const [stub] = await rows("access_requests", `id=eq.${requestId}`);
+  assert.ok(new Date(stub.expires_at).getTime() <= Date.now() + RESULT_GRACE + 5000, "capped shortly after the first read");
+
+  await patchRows("access_requests", `id=eq.${requestId}`, { expires_at: new Date(Date.now() - 1000).toISOString() }); // time passes
+  // The expiry cleanup runs opportunistically (polls, submissions, the admin list), at most once a minute per
+  // function instance, so allow up to a minute plus slack for the next sweep.
+  for (let i = 0; i < 26 && (await rows("access_requests", `id=eq.${requestId}`)).length; i++) {
+    await new Promise((r) => setTimeout(r, 3000));
+    await adminCall("GET", "/requests");
+    await call("GET", `${base}/requests/${requestId}?nonce=${nonce()}`, null, { "x-poll-token": pollToken });
+  }
+  assert.deepEqual(await rows("access_requests", `id=eq.${requestId}`), [], "the un-acknowledged stub is gone");
+  assert.equal((await rows("access_grants", `request_id=eq.${requestId}`)).length, 1, "the active authorization is unaffected");
+  assert.equal((await session(grantToken)).valid, true, "and the grant still validates");
+});
+
+test("phase3 expiry: every plan gets the server-side duration, bound to the request, plan and device", async () => {
+  for (const [plan, hours] of [["1h", 1], ["5h", 5], ["10h", 10]]) {
+    const before = Date.now();
+    const { requestId, pollToken, dev } = await submitInviteFor(plan);
+    await adminCall("POST", `/requests/${requestId}/decision`, { decision: "approve" });
+    const status = await poll(requestId, pollToken);
+    const claims = verified(status.grant, "axe-grant");
+
+    assert.match(claims.jti, UUID_RE);
+    assert.equal(claims.rid, requestId, "bound to the request");
+    assert.equal(claims.plan, plan);
+    assert.equal(claims.did, dev, "bound to the requesting PC");
+    assert.equal(claims.exp - claims.iat, hours * 3600_000, `${plan} lasts exactly ${hours}h from approval`);
+    assert.ok(claims.iat >= before - 5000 && claims.iat <= Date.now() + 5000, "issued at the server's approval time");
+    assert.ok(Math.abs(status.now - claims.iat) < 60_000, "status carries the server clock");
+
+    const s = await session(status.grant);
+    assert.equal(s.valid, true);
+    assert.equal(s.exp, claims.exp);
+    assert.ok(Math.abs(s.now - Date.now()) < 60_000, "session carries trusted server time");
+    await ack(requestId, pollToken);
+  }
+});
+
+test("phase3 expiry: an expired authorization is refused by the server", async () => {
+  const { requestId, pollToken } = await submitInviteFor("1h");
+  await adminCall("POST", `/requests/${requestId}/decision`, { decision: "approve" });
+  const status = await poll(requestId, pollToken);
+  const claims = verified(status.grant, "axe-grant");
+  assert.equal((await session(status.grant)).valid, true);
+
+  await patchRows("access_grants", `jti=eq.${claims.jti}`, { expires_at: new Date(Date.now() - 1000).toISOString() });
+  const expired = await session(status.grant);
+  assert.equal(expired.valid, false);
+  assert.equal(expired.reason, "expired");
+  await ack(requestId, pollToken);
+});
+
+test("phase3 security: grants of the wrong kind, forged or altered are refused by the server", async () => {
+  const { requestId, pollToken } = await submitInviteFor("1h");
+  await adminCall("POST", `/requests/${requestId}/decision`, { decision: "approve" });
+  const res = await call("GET", `${base}/requests/${requestId}?nonce=${nonce()}`, null, { "x-poll-token": pollToken });
+  const statusToken = res.body.token; // a genuine, server-signed token of another type
+  assert.equal((await session(statusToken)).valid, false, "a status token is not a grant");
+
+  const grant = (await poll(requestId, pollToken)).grant;
+  const [payload, sig] = grant.split(".");
+  const claims = JSON.parse(Buffer.from(payload, "base64url").toString());
+  for (const change of [{ did: "0".repeat(64) }, { rid: randomUUIDish() }, { plan: "10h" }, { exp: claims.exp + 3600_000 }]) {
+    const forged = `${Buffer.from(JSON.stringify({ ...claims, ...change })).toString("base64url")}.${sig}`;
+    assert.equal((await session(forged)).valid, false, `altering ${Object.keys(change)[0]} breaks the signature`);
+  }
+  assert.equal((await session(`${payload}.${Buffer.alloc(64).toString("base64url")}`)).valid, false);
+  assert.equal((await session(grant)).valid, true, "the genuine grant still works");
+  await ack(requestId, pollToken);
+});
+
+test("invitation codes: every configured code works (any letter case), unknown codes are refused", async () => {
+  // Reads the codes the LOCAL stack is configured with (supabase/functions/.env, git-ignored) so no code is hardcoded here.
+  const env = readFileSync(join(v2, "backend", "supabase", "functions", ".env"), "utf8");
+  const configured = env.match(/^AXE_INVITE_CODES=(.*)$/m)[1].split(",").map((c) => c.trim().toUpperCase()).filter(Boolean);
+  assert.ok(configured.length >= 1, "the local stack has at least one invitation code");
+
+  for (const code of configured) {
+    for (const sent of [code, code.toLowerCase()]) {
+      const res = await call("POST", `${base}/requests`, { kind: "invite", name: "Test Code", plan: "1h", code: sent, device: device() });
+      assert.equal(res.status, 201, `a configured code must be accepted: ${JSON.stringify(res.body)}`);
+      const [row] = await rows("access_requests", `id=eq.${res.body.requestId}`);
+      assert.equal(row.invite_code, code, "the code is normalised to upper case");
+      await call("DELETE", `${base}/requests/${res.body.requestId}`, null, { "x-poll-token": res.body.pollToken });
+    }
+  }
+  const unknown = ["NOTACODE1", `${configured[0]}X`, configured[0].slice(0, -1), "", "NO SPACE1"];
+  for (const bad of unknown) {
+    const res = await call("POST", `${base}/requests`, { kind: "invite", name: "Test Code", plan: "1h", code: bad, device: device() });
+    assert.equal(res.status, 400, `"${bad}" must be refused`);
+  }
 });

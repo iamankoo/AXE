@@ -2,8 +2,9 @@
 
 The admin client for the AXE v2 backend. **Phases 1-2 of 5 are implemented**: admin sign-in with secure session
 storage, and request management (pending list, detail, payment screenshot, approve / reject).
-Notifications (FCM), the end-to-end Windows authorization workflow polish, and production hardening are **not
-implemented yet** (see [What remains](#what-remains)).
+Notifications (FCM) and production hardening are **not implemented yet** (see [What remains](#what-remains)). The
+Windows side of the authorization workflow is documented in [`../AUTHORIZATION.md`](../AUTHORIZATION.md); this app did not
+change for it.
 
 - Location: `v2/AXE-Admin/` (separate Gradle project; AXE v1 is untouched)
 - App name: **AXE Admin**; package / applicationId: `com.axe.admin`
@@ -98,7 +99,8 @@ computes expiry, or alters amounts.
 
 Requests are temporary and all deletion is server-side. See [`../backend/DATA_LIFECYCLE.md`](../backend/DATA_LIFECYCLE.md):
 at decision the server clears all request/payment data and deletes the screenshot; the remaining result stub is deleted
-the moment the Windows client collects its result; there is no archive or soft delete. The Android app only displays
+when the Windows client acknowledges it has stored the result (at most 15 minutes after it first reads it); there is no
+archive or soft delete. The Android app only displays
 what the server returns.
 
 ## Authentication flow and secure storage
@@ -142,7 +144,7 @@ $env:ANDROID_SERIAL = "<device serial>"; .\gradlew :app:connectedDebugAndroidTes
 Backend tests (need the local Supabase stack and `functions serve`, see the header of `backend/tests/api.test.mjs`):
 
 ```powershell
-cd v2\backend; node --test tests/api.test.mjs    # 14 tests, incl. the data-lifecycle tests against real DB/storage state
+cd v2\backend; node --test tests/api.test.mjs    # 22 tests, incl. lifecycle, delivery and expiry tests against real DB/storage state
 ```
 
 The JVM tests cover the repository and API parsing with backend-shaped JSON (list, detail, screenshot, decisions, all
@@ -167,6 +169,5 @@ production backend and account.
 
 ## What remains
 
-- **Phase 3**: end-to-end Windows ↔ backend ↔ Android workflow verification (the Windows client is unchanged).
 - **Phase 4**: FCM notifications (`POST/DELETE /admin/devices` with a real token) and notification lifecycle.
 - **Phase 5**: release signing, security/session review, offline polish, integration tests.

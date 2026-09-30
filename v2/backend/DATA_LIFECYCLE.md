@@ -21,8 +21,9 @@ POST /access/requests ──▶ validate, store row + screenshot object,
                           4. delete the screenshot object from storage, then clear screenshot_path
                           5. respond {ok, decision} ─────────────────────▶ list refreshes from the server
 GET /access/requests/:id ─▶ verify poll token, sign the status token (approved + grant | rejected)
-                          DELETE THE STUB ROW (and any leftover screenshot)   ← delete on pickup
-            ◀─ signed result
+            ◀─ signed result   (first read caps the stub's life at RESULT_GRACE_MS = 15 min)
+client saves the grant / handles the rejection
+DELETE /access/requests/:id ─▶ ACKNOWLEDGED: delete the stub row (and any leftover screenshot) at once
 ```
 
 ## What exists when
@@ -31,19 +32,24 @@ GET /access/requests/:id ─▶ verify poll token, sign the status token (approv
 | --- | --- | --- | --- |
 | Pending | full row (name, amount, UTR / code, screenshot path) | screenshot (payments) | none |
 | Decided, not yet collected | **stub only**: id, status, poll-token hash, signed grant (approved), device binding, timestamps. All request/payment fields are null/false | **deleted** | approved: 1 active row |
-| Collected by the Windows client | **deleted** | deleted | approved: 1 active row (kept until expiry + 1 day) |
-| Never collected | stub removed at the hard cap (`PICKUP_TTL_MS`, 24 h) by the expiry cleanup | deleted | as above |
+| Read by the Windows client, not yet acknowledged | same stub, readable again (a retry gets the same signed result); expiry shortened to 15 min after the first read | deleted | as above |
+| Acknowledged by the Windows client | **deleted** | deleted | approved: 1 active row (kept until expiry + 1 day) |
+| Never acknowledged | stub removed 15 min after its first read by the expiry cleanup | deleted | as above |
+| Never read | stub removed at the hard cap (`PICKUP_TTL_MS`, 24 h) by the expiry cleanup | deleted | as above |
 
 Nothing is soft-deleted, archived, or hidden. There is no `deleted` flag and no scheduled "history" cleanup: the
-only timer is the 24 h cap for a result that the Windows client never collects.
+only timers are the 15-minute bound after a first read and the 24 h cap for a result that is never read.
 
 ## Why the stub exists (and is not deleted at decision time)
 
 The Windows client polls `GET /access/requests/:id` (authenticated by its poll token) to learn the result; a missing
 row is reported to it as "request no longer active, submit again". Deleting the row inside the decision call would
 silently lose a paid approval if the PC had not polled yet. So the row is reduced to the minimum needed to deliver
-the result and removed the moment it has been delivered. An approval's *active authorization* lives separately in
-`access_grants` and follows the existing expiry design.
+the result and is removed when the client **acknowledges** it has stored the result. An approval's *active
+authorization* lives separately in `access_grants` and follows the existing expiry design.
+
+Phase 2 deleted the stub on the first read; Phase 3 replaced that with read-then-acknowledge because a lost response
+(or a crash before the grant was saved) made the delivery unrecoverable. See `../AUTHORIZATION.md`.
 
 ## Failure behavior
 
@@ -52,23 +58,23 @@ the result and removed the moment it has been delivered. An approval's *active a
 * Decisions are conditional (`WHERE status='pending'`): two admins deciding at once yield exactly one `200`, one
   `409`, and exactly one grant.
 * The status token is signed **before** the stub is deleted; if signing fails, nothing is deleted.
-* If the screenshot delete fails at decision time, `screenshot_path` is kept so the pickup (or the expiry cleanup)
-  removes the object instead of orphaning it. If the stub delete fails at pickup it is logged and the expiry cleanup
-  removes it.
+* If the screenshot delete fails at decision time, `screenshot_path` is kept so the acknowledgement (or the expiry
+  cleanup) removes the object instead of orphaning it.
+* Acknowledging is idempotent and needs the poll secret; a wrong secret or an unknown id deletes nothing.
 
 ## Known trade-offs
 
-* **Delivered once.** If the Windows client collects its result but the HTTP response is lost, a retry returns
-  "no longer active" and the user must submit again (an approval's grant row stays until it expires). This is the
-  accepted cost of delete-on-pickup; an explicit acknowledgement step from the client would remove it (Windows change,
-  not done).
+* **Recovery window.** A lost response or a crash before the grant is saved is recoverable only while the stub exists:
+  until the client acknowledges, and at most 15 minutes after the first read. After that the user submits again (an
+  approval's grant row stays until it expires). Builds without the acknowledgement never acknowledge, so their stubs live
+  for the 15 minutes.
 * **Reused-payment detection.** `used_references` keeps a keyed HMAC of each approved UTR for 7 days (no plaintext,
   self-deleting) so the admin can be warned about a reused reference. This is the one deliberate exception to "no UTR
   trace"; it can be removed at the cost of that warning.
 
 ## Tests
 
-`v2/backend/tests/api.test.mjs` ("lifecycle:" tests) read the actual Postgres rows and storage objects with the local
+`v2/backend/tests/api.test.mjs` ("lifecycle:" and "phase3" tests) read the actual Postgres rows and storage objects with the local
 service-role key (fetched from the Supabase CLI at run time, never written to disk) and assert the states above for
 approve, reject, invitation, storage, repeated/racing decisions, and refused decisions. See `v2/AXE-Admin/README.md`
 for how to run them.

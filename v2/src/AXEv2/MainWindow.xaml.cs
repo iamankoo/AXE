@@ -131,20 +131,13 @@ public partial class MainWindow
             return;
         }
 
-        switch (_accessController.Phase)
+        if (_accessController.Phase.AllowsBrowsing())
         {
-            case AccessPhase.Active:
-                ShowAuthorizedBrowser();
-                break;
-
-            case AccessPhase.NeedsAccess:
-            case AccessPhase.Pending:
-            case AccessPhase.Offline:
-            case AccessPhase.Checking:
-            case AccessPhase.NotConfigured:
-            default:
-                HideAuthorizedBrowser();
-                break;
+            ShowAuthorizedBrowser();
+        }
+        else
+        {
+            HideAuthorizedBrowser();
         }
     }
 

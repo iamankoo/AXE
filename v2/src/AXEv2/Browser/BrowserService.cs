@@ -514,13 +514,20 @@ public sealed class BrowserService : IDisposable
 
     public void FocusPage() => ActiveTab?.View.Focus();
 
-    /// <summary>Hides every tab (e.g. while a message or the access screen covers the browser area).</summary>
+    /// <summary>
+    /// Hides every tab while the access screen covers the browser area (no authorization). Hidden tabs are also
+    /// muted, so media that was playing when access ended or was refused cannot keep going behind the lock screen.
+    /// </summary>
     public void SetBrowserVisible(bool visible)
     {
         _browserVisible = visible;
         foreach (var tab in Tabs)
         {
             tab.View.Visibility = visible && tab == ActiveTab ? Visibility.Visible : Visibility.Hidden;
+            if (tab.Core is { } core)
+            {
+                core.IsMuted = !visible;
+            }
         }
     }
 

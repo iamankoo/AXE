@@ -2,7 +2,7 @@
 //
 //   POST   /access/requests        submit a payment or invitation request
 //   GET    /access/requests/:id    poll the decision (x-poll-token header, ?nonce=) → signed status
-//   DELETE /access/requests/:id    withdraw a pending request (deletes it and its screenshot)
+//   DELETE /access/requests/:id    withdraw a pending request, or acknowledge a decided result (deletes it at once)
 //   POST   /access/session         validate a grant → signed server time + validity
 //
 // The server alone decides: invitation codes are checked here (never in the client), every
@@ -10,7 +10,7 @@
 
 import { b64urlDecode, hmacHex, randomToken, sha256Hex, timingSafeEqual } from "../_shared/crypto.ts";
 import {
-  cleanup, clientKey, db, fail, json, PENDING_TTL_MS, PLANS, rateLimited, route, SCREENSHOT_BUCKET,
+  cleanup, clientKey, db, fail, json, PENDING_TTL_MS, PLANS, rateLimited, RESULT_GRACE_MS, route, SCREENSHOT_BUCKET,
 } from "../_shared/common.ts";
 import { signClaims, verifyClaims } from "../_shared/signing.ts";
 import { notifyAdmins } from "../_shared/push.ts";
@@ -196,6 +196,7 @@ async function status(req: Request, id: string): Promise<Response> {
   const nonce = new URL(req.url).searchParams.get("nonce") ?? "";
   if (!NONCE.test(nonce)) return fail(400, "Bad request.");
   if (await rateLimited(`poll:${await clientKey(req)}`, 120, 60)) return fail(429, "Too many requests.");
+  await cleanup().catch((e) => console.error("cleanup failed", e instanceof Error ? e.message : e)); // at most once a minute
 
   const request = await authorizedRequest(req, id);
   if (!request) return fail(404, "This request is no longer active.");
@@ -216,24 +217,33 @@ async function status(req: Request, id: string): Promise<Response> {
     grant: state === "approved" ? request.grant_token : null,
   });
 
-  // Delete on pickup: a decided request's result stub has done its job once the signed result is in hand
-  // (an approval's active authorization lives on in access_grants). The token is signed first, so a failure
-  // above deletes nothing; a failed delete here is logged and the stub is removed by the expiry cleanup.
+  // Reliable delivery: reading a decided result does NOT delete it, so a retry after a lost response (or a client
+  // crash before it saved the grant) gets the same signed result again. The client acknowledges once the result is
+  // safely stored (DELETE below), which removes the stub at once. A client that never acknowledges cannot keep it
+  // past RESULT_GRACE_MS after the first read; the expiry cleanup then deletes it. The token is signed first, so a
+  // failure above changes nothing.
   if (state === "approved" || state === "rejected") {
-    if (request.screenshot_path) await db().storage.from(SCREENSHOT_BUCKET).remove([request.screenshot_path]);
-    const { error } = await db().from("access_requests").delete().eq("id", id).in("status", ["approved", "rejected"]);
-    if (error) console.error("decided request delete failed", error.message);
+    const graceEnd = Date.now() + RESULT_GRACE_MS;
+    if (new Date(request.expires_at).getTime() > graceEnd) {
+      const { error } = await db().from("access_requests")
+        .update({ expires_at: new Date(graceEnd).toISOString() })
+        .eq("id", id).in("status", ["approved", "rejected"]);
+      if (error) console.error("could not shorten the result grace period", error.message);
+    }
   }
   return json(200, { token });
 }
 
+/**
+ * DELETE /access/requests/:id, used for two things by the poll-secret holder: withdrawing a pending request, and
+ * ACKNOWLEDGING a decided one (approved / rejected) once the client has stored the result. Either way the row and any
+ * screenshot are deleted at once. Unknown or already-deleted ids answer ok, so acknowledging is idempotent.
+ */
 async function cancel(req: Request, id: string): Promise<Response> {
   const request = await authorizedRequest(req, id);
   if (!request) return json(200, { ok: true }); // already gone
-  if (request.status === "pending") {
-    if (request.screenshot_path) await db().storage.from(SCREENSHOT_BUCKET).remove([request.screenshot_path]);
-    await db().from("access_requests").delete().eq("id", id);
-  }
+  if (request.screenshot_path) await db().storage.from(SCREENSHOT_BUCKET).remove([request.screenshot_path]);
+  await db().from("access_requests").delete().eq("id", id).in("status", ["pending", "approved", "rejected"]);
   return json(200, { ok: true });
 }
 

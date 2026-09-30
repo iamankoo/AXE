@@ -162,8 +162,8 @@ async function decide(req: Request, id: string, adminId: string): Promise<Respon
   // Conditional update: only a still-pending request can be decided (no double decisions).
   // The decided row becomes a minimal RESULT STUB for the Windows client (id, poll-token hash, status, signed
   // grant). All request/payment data is cleared here, server-side, regardless of what the admin app does next.
-  // The stub itself is deleted the moment the client picks up its result (see access/index.ts), with
-  // PICKUP_TTL_MS as the hard cap if the PC never comes back. screenshot_path is kept until the object is
+  // The stub itself is deleted when the client acknowledges it has stored the result (DELETE in access/index.ts),
+  // at most RESULT_GRACE_MS after its first read, with PICKUP_TTL_MS as the hard cap if the PC never comes back. screenshot_path is kept until the object is
   // really gone, so a failed storage delete can still be swept later instead of orphaning the file.
   const { data: updated, error: updateError } = await db().from("access_requests").update({
     status: decision === "approve" ? "approved" : "rejected",

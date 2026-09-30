@@ -108,6 +108,14 @@ public sealed class AccessClient : IDisposable
         await ReadJsonAsync(response, ct);
     }
 
+    /// <summary>
+    /// Tells the server the decided result (approval or rejection) has been stored, so it deletes its result stub
+    /// at once. The server keeps the stub readable until this arrives (or a short grace period ends), which is what
+    /// lets a lost response be retried. Same endpoint and idempotent semantics as <see cref="CancelAsync"/>.
+    /// </summary>
+    public Task AcknowledgeAsync(string requestId, string pollToken, CancellationToken ct) =>
+        CancelAsync(requestId, pollToken, ct);
+
     /// <summary>Validates a grant with the server and returns the signed, current server time.</summary>
     public async Task<SessionClaims> CheckSessionAsync(string grant, CancellationToken ct)
     {
