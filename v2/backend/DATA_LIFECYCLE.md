@@ -72,6 +72,12 @@ Phase 2 deleted the stub on the first read; Phase 3 replaced that with read-then
   self-deleting) so the admin can be warned about a reused reference. This is the one deliberate exception to "no UTR
   trace"; it can be removed at the cost of that warning.
 
+## Notifications are not history
+
+Phase 4 push notifications (`../NOTIFICATIONS.md`) carry only generic text, `type` and the request id. Nothing about the
+request is sent to or stored by FCM, no notification log or table exists, and sending never retains request data: the
+lifecycle above is unchanged.
+
 ## Tests
 
 `v2/backend/tests/api.test.mjs` ("lifecycle:" and "phase3" tests) read the actual Postgres rows and storage objects with the local

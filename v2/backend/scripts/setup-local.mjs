@@ -1,6 +1,6 @@
 // Prepares the LOCAL development backend (Supabase CLI stack) for AXE v2.
 //
-//   node scripts/setup-local.mjs [--sink http://host.docker.internal:8799/]
+//   node scripts/setup-local.mjs [--sink http://host.docker.internal:8799/] [--fake-fcm http://host.docker.internal:8798]
 //
 // Creates (all git-ignored, never committed):
 //   backend/supabase/functions/.env   server secrets for `supabase functions serve`
@@ -20,6 +20,10 @@ const v2 = join(backend, "..");
 const envFile = join(backend, "supabase", "functions", ".env");
 const sinkArg = process.argv.indexOf("--sink");
 const sink = sinkArg > 0 ? process.argv[sinkArg + 1] : "";
+// Development only: point the push sender at a LOCAL fake FCM server (tests/push.test.mjs runs one) and use a
+// throw-away service account generated here. It never contains real Firebase credentials and stays in the git-ignored .env.
+const fakeFcmArg = process.argv.indexOf("--fake-fcm");
+const fakeFcm = fakeFcmArg > 0 ? process.argv[fakeFcmArg + 1] : "";
 
 const status = JSON.parse(execFileSync("npx", ["--yes", "supabase", "status", "-o", "json"], {
   cwd: backend, encoding: "utf8", shell: true, stdio: ["ignore", "pipe", "ignore"],
@@ -47,7 +51,20 @@ const env = {
   // Local development only: repeated test runs submit many requests. Production keeps the default (10/hour).
   AXE_SUBMIT_LIMIT: "500",
   FCM_SERVICE_ACCOUNT_JSON: existing.FCM_SERVICE_ACCOUNT_JSON || "",
+  ...(existing.AXE_FCM_API_BASE ? { AXE_FCM_API_BASE: existing.AXE_FCM_API_BASE } : {}),
+  ...(existing.AXE_FCM_OAUTH_URL ? { AXE_FCM_OAUTH_URL: existing.AXE_FCM_OAUTH_URL } : {}),
 };
+if (fakeFcm) {
+  const { privateKey: fakeKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  env.FCM_SERVICE_ACCOUNT_JSON = JSON.stringify({
+    project_id: "axe-local-fake",
+    client_email: "fake@axe-local-fake.iam.gserviceaccount.com",
+    private_key: fakeKey.export({ type: "pkcs8", format: "pem" }),
+  });
+  env.AXE_FCM_API_BASE = fakeFcm.replace(/\/$/, "");
+  env.AXE_FCM_OAUTH_URL = `${fakeFcm.replace(/\/$/, "")}/token`;
+  console.log("  NOTE: --fake-fcm set a throw-away service account and local FCM endpoints (development only).");
+}
 mkdirSync(dirname(envFile), { recursive: true });
 writeFileSync(envFile, Object.entries(env).map(([k, v]) => `${k}=${v}`).join("\n") + "\n");
 

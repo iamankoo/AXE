@@ -10,7 +10,7 @@
 
 import { b64urlDecode, hmacHex, randomToken, sha256Hex, timingSafeEqual } from "../_shared/crypto.ts";
 import {
-  cleanup, clientKey, db, fail, json, PENDING_TTL_MS, PLANS, rateLimited, RESULT_GRACE_MS, route, SCREENSHOT_BUCKET,
+  background, cleanup, clientKey, db, fail, json, PENDING_TTL_MS, PLANS, rateLimited, RESULT_GRACE_MS, route, SCREENSHOT_BUCKET,
 } from "../_shared/common.ts";
 import { signClaims, verifyClaims } from "../_shared/signing.ts";
 import { notifyAdmins } from "../_shared/push.ts";
@@ -165,19 +165,9 @@ async function submit(req: Request): Promise<Response> {
     await db().from("access_requests").update({ screenshot_path: path }).eq("id", id);
   }
 
-  await notifyAdmins(kind === "payment"
-    ? {
-      title: "AXE Payment Request",
-      body: `Name: ${name}\nPlan: ${plan.label}\nAmount: ₹${row.amount_paid}\nUTR: ${row.utr}\nNew verification requires your review.`,
-      requestId: id,
-      kind: "payment",
-    }
-    : {
-      title: "AXE Invitation Request",
-      body: `Name: ${name}\nCode: ${row.invite_code}\nRequested duration: ${plan.label}`,
-      requestId: id,
-      kind: "invite",
-    });
+  // The request is stored and valid. Tell the admin app in the background: the notification is a doorbell carrying
+  // only generic text and the request id, and whether it is delivered never affects this response.
+  background(notifyAdmins({ requestId: id, kind: kind as "payment" | "invite" }));
 
   return json(201, { requestId: id, pollToken });
 }

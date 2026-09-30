@@ -30,6 +30,46 @@ if (supabaseUrl.isEmpty() || anonKey.isEmpty()) {
         if (anonKey.isEmpty()) anonKey = (parsed["anonKey"] as? String).orEmpty()
     }
 }
+
+// ---- Client-safe Firebase configuration (push notifications) -----------------------------------
+// These four values identify the Firebase app to the FCM client SDK. They are PUBLIC client identifiers (they ship in
+// every Firebase Android app), NOT credentials: the FCM server credential (a service-account key) lives only in the
+// backend secret store and is never read here. Source, in order:
+//   1. AXE-Admin/local.properties  (axe.firebase.projectId / appId / apiKey / senderId)  - git-ignored
+//   2. AXE-Admin/app/google-services.json (as downloaded from the Firebase console)       - git-ignored
+// If neither exists the app builds and works normally; push notifications are simply off.
+var fbProjectId = localProps.getProperty("axe.firebase.projectId", "").trim()
+var fbAppId = localProps.getProperty("axe.firebase.appId", "").trim()
+var fbApiKey = localProps.getProperty("axe.firebase.apiKey", "").trim()
+var fbSenderId = localProps.getProperty("axe.firebase.senderId", "").trim()
+if (fbProjectId.isEmpty() || fbAppId.isEmpty() || fbApiKey.isEmpty() || fbSenderId.isEmpty()) {
+    val services = project.file("google-services.json")
+    if (services.exists()) {
+        @Suppress("UNCHECKED_CAST")
+        val json = JsonSlurper().parse(services) as Map<String, Any?>
+        @Suppress("UNCHECKED_CAST")
+        val info = json["project_info"] as? Map<String, Any?> ?: emptyMap()
+        @Suppress("UNCHECKED_CAST")
+        val clients = json["client"] as? List<Map<String, Any?>> ?: emptyList()
+        val mine = clients.firstOrNull { c ->
+            @Suppress("UNCHECKED_CAST")
+            val ci = c["client_info"] as? Map<String, Any?> ?: emptyMap()
+            @Suppress("UNCHECKED_CAST")
+            val a = ci["android_client_info"] as? Map<String, Any?> ?: emptyMap()
+            a["package_name"] == "com.axe.admin"
+        }
+        if (mine != null) {
+            @Suppress("UNCHECKED_CAST")
+            val ci = mine["client_info"] as Map<String, Any?>
+            @Suppress("UNCHECKED_CAST")
+            val keys = mine["api_key"] as? List<Map<String, Any?>> ?: emptyList()
+            if (fbProjectId.isEmpty()) fbProjectId = (info["project_id"] as? String).orEmpty()
+            if (fbSenderId.isEmpty()) fbSenderId = (info["project_number"] as? String).orEmpty()
+            if (fbAppId.isEmpty()) fbAppId = (ci["mobilesdk_app_id"] as? String).orEmpty()
+            if (fbApiKey.isEmpty()) fbApiKey = (keys.firstOrNull()?.get("current_key") as? String).orEmpty()
+        }
+    }
+}
 fun String.asBuildConfigString() = "\"" + replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
 android {
@@ -45,6 +85,10 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "SUPABASE_URL", supabaseUrl.asBuildConfigString())
         buildConfigField("String", "SUPABASE_ANON_KEY", anonKey.asBuildConfigString())
+        buildConfigField("String", "FIREBASE_PROJECT_ID", fbProjectId.asBuildConfigString())
+        buildConfigField("String", "FIREBASE_APP_ID", fbAppId.asBuildConfigString())
+        buildConfigField("String", "FIREBASE_API_KEY", fbApiKey.asBuildConfigString())
+        buildConfigField("String", "FIREBASE_SENDER_ID", fbSenderId.asBuildConfigString())
     }
 
     buildTypes {
@@ -75,6 +119,9 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.androidx.lifecycle.process)
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.messaging)
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.tooling.preview)

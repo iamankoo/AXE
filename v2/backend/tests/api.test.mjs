@@ -89,7 +89,7 @@ async function session(grant) {
 
 async function waitForPush(requestId) {
   for (let i = 0; i < 40; i++) {
-    const found = pushes.find((p) => p.requestId === requestId);
+    const found = pushes.find((p) => p.data?.requestId === requestId);
     if (found) return found;
     await new Promise((r) => setTimeout(r, 100));
   }
@@ -133,9 +133,10 @@ test("valid invitation still needs manual approval; approval starts the timer on
   const { requestId, pollToken } = submitted.body;
 
   const push = await waitForPush(requestId);
-  assert.equal(push.title, "AXE Invitation Request");
-  assert.match(push.body, /Code: PAPAJI500/);
-  assert.match(push.body, /5 Hours/);
+  assert.equal(push.title, "AXE Admin");
+  assert.equal(push.body, "New invitation request received. Tap to review.");
+  assert.deepEqual(push.data, { type: "new_request", requestId });
+  assert.doesNotMatch(JSON.stringify(push), /Test Invitee|PAPAJI500|5 Hours/, "the notification carries no request details");
 
   assert.equal((await poll(requestId, pollToken)).status, "pending", "a matching code alone grants nothing");
 
@@ -175,10 +176,10 @@ test("payment: screenshot reaches the admin, approval issues a grant, data is de
   const { requestId, pollToken } = submitted.body;
 
   const push = await waitForPush(requestId);
-  assert.equal(push.title, "AXE Payment Request");
-  assert.match(push.body, /Name: Test Payer/);
-  assert.match(push.body, /₹149/);
-  assert.match(push.body, new RegExp(`UTR: ${utr}`));
+  assert.equal(push.title, "AXE Admin");
+  assert.equal(push.body, "New payment request received. Tap to review.");
+  assert.deepEqual(push.data, { type: "new_request", requestId });
+  assert.doesNotMatch(JSON.stringify(push), new RegExp(`Test Payer|${utr}|149`), "no name, amount or UTR in the notification");
 
   const detail = await adminCall("GET", `/requests/${requestId}`);
   assert.equal(detail.status, 200);

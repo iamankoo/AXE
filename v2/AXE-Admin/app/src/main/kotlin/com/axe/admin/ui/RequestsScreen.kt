@@ -98,6 +98,8 @@ fun RequestsScreen(
     onRefresh: () -> Unit,
     onOpen: (String) -> Unit,
     modifier: Modifier = Modifier,
+    showNotificationNotice: Boolean = false,
+    onOpenNotificationSettings: () -> Unit = {},
 ) {
     Column(modifier.fillMaxSize()) {
         Row(
@@ -125,6 +127,18 @@ fun RequestsScreen(
                     if (state.refreshing) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
                     else RefreshGlyph(MaterialTheme.colorScheme.primary)
                 }
+            }
+        }
+
+        if (showNotificationNotice) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Notifications are off, so new requests won't alert you.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = onOpenNotificationSettings) { Text("Settings") }
             }
         }
 

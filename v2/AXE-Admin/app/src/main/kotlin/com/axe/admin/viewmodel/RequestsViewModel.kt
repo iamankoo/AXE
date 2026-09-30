@@ -9,6 +9,7 @@ import com.axe.admin.repository.RequestFailure
 import com.axe.admin.repository.RequestRepository
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -59,7 +60,7 @@ sealed interface DetailState {
 }
 
 /** One-shot notices for the UI (shown once, then acknowledged). */
-enum class UiMessage { Approved, Rejected, AlreadyHandled }
+enum class UiMessage { Approved, Rejected, AlreadyHandled, NewRequest, RequestUnavailable }
 
 /**
  * Screen state and actions for Requests (list and detail). It holds no authorization logic: a decision is just
@@ -68,6 +69,8 @@ enum class UiMessage { Approved, Rejected, AlreadyHandled }
 class RequestsViewModel(
     private val repository: RequestRepository,
     signedIn: Flow<Boolean>,
+    /** Request ids of "new request" pushes that arrived while the app is in the foreground. */
+    newRequests: Flow<String> = emptyFlow(),
     private val imageValidator: ImageValidator,
 ) : ViewModel() {
 
@@ -84,9 +87,23 @@ class RequestsViewModel(
     private var detailJob: Job? = null
     private var decisionJob: Job? = null
 
+    private val seenNotifications = LinkedHashSet<String>()
+
     init {
         // This ViewModel outlives a sign-out (it is Activity-scoped): never keep one admin's data around.
         viewModelScope.launch { signedIn.collect { if (!it) reset() } }
+        viewModelScope.launch { newRequests.collect(::onNewRequestSignal) }
+    }
+
+    /**
+     * A "new request" push arrived while the app is open: tell the admin once and refresh the list from the server. The
+     * id is only used to recognise repeats; nothing in the push is displayed.
+     */
+    private fun onNewRequestSignal(requestId: String) {
+        if (!seenNotifications.add(requestId)) return // the same event twice: ignore
+        if (seenNotifications.size > MAX_SEEN_NOTIFICATIONS) seenNotifications.remove(seenNotifications.first())
+        _message.value = UiMessage.NewRequest
+        refresh() // joins a refresh already in flight instead of starting another
     }
 
     // ---- list ------------------------------------------------------------------------------------
@@ -116,6 +133,21 @@ class RequestsViewModel(
 
     // ---- detail ----------------------------------------------------------------------------------
 
+    /**
+     * The admin tapped a notification. The id is untrusted: the authoritative request is fetched from the backend (this
+     * requires the signed-in session that this ViewModel exists under). If it no longer exists (handled, expired, deleted)
+     * the admin is told so and the list is refreshed; nothing is ever shown from the notification itself.
+     */
+    fun openFromNotification(id: String) {
+        val current = _detail.value
+        if ((current as? DetailState.Ready)?.decision is DecisionState.Submitting) return // never interrupt a decision
+        if (current is DetailState.Ready && current.request.id == id) return
+        detailJob?.cancel()
+        _detail.value = DetailState.Loading(id, null)
+        refresh()
+        detailJob = viewModelScope.launch { loadDetail(id, null, fromNotification = true) }
+    }
+
     fun open(id: String) {
         if (_detail.value !is DetailState.Closed) return
         val summary = _list.value.requests.firstOrNull { it.id == id }
@@ -132,9 +164,16 @@ class RequestsViewModel(
         detailJob = viewModelScope.launch { loadDetail(state.id, state.summary) }
     }
 
-    private suspend fun loadDetail(id: String, summary: AccessRequest?) {
+    private suspend fun loadDetail(id: String, summary: AccessRequest?, fromNotification: Boolean = false) {
         when (val result = repository.detail(id)) {
             is Outcome.Failure -> {
+                if (result.failure == RequestFailure.NotFound && fromNotification) {
+                    // A stale notification: say so and go back to the (refreshed) list instead of an error screen.
+                    _detail.value = DetailState.Closed
+                    _message.value = UiMessage.RequestUnavailable
+                    refresh()
+                    return
+                }
                 _detail.value = DetailState.Failed(id, summary, result.failure)
                 if (result.failure == RequestFailure.NotFound) refresh() // it is gone: bring the list up to date
             }
@@ -234,5 +273,10 @@ class RequestsViewModel(
         _list.value = ListState()
         _detail.value = DetailState.Closed
         _message.value = null
+        seenNotifications.clear()
+    }
+
+    private companion object {
+        const val MAX_SEEN_NOTIFICATIONS = 50
     }
 }

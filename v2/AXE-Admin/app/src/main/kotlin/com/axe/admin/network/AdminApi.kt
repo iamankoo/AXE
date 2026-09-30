@@ -43,6 +43,26 @@ class AdminApi(
         }
     }
 
+    /**
+     * `POST /admin/devices`: registers this device's FCM token for the signed-in admin (the server takes the owner from
+     * the session). [previousToken] is the token this one replaces; the server removes it if it is this admin's.
+     */
+    suspend fun registerDevice(accessToken: String, token: String, previousToken: String?) {
+        val body = buildJsonObject {
+            put("token", token)
+            if (previousToken != null) put("previousToken", previousToken)
+        }.toString()
+        val request = authed(accessToken, "${config.adminUrl}/devices".toHttpUrl()).post(body.toRequestBody(JSON_MEDIA)).build()
+        requireOk(transport.execute(request).code)
+    }
+
+    /** `DELETE /admin/devices`: removes this device's token (sign-out). Unknown tokens are not an error. */
+    suspend fun unregisterDevice(accessToken: String, token: String) {
+        val body = buildJsonObject { put("token", token) }.toString()
+        val request = authed(accessToken, "${config.adminUrl}/devices".toHttpUrl()).delete(body.toRequestBody(JSON_MEDIA)).build()
+        requireOk(transport.execute(request).code)
+    }
+
     /** `GET /admin/requests`: pending, unexpired requests, oldest first (server caps at 100). */
     suspend fun listRequests(accessToken: String): List<AccessRequestDto> {
         val request = authed(accessToken, requestsUrl()).get().build()

@@ -21,6 +21,18 @@ export const PICKUP_TTL_MS = 24 * 60 * 60 * 1000;
  */
 export const RESULT_GRACE_MS = 15 * 60 * 1000;
 
+/**
+ * Runs best-effort work (e.g. a push notification) after the response is on its way. The work must not throw;
+ * anything it does fail at is its own problem and can never change the outcome of the request that started it.
+ * Uses the edge runtime's waitUntil so the work finishes even after the response is sent.
+ */
+export function background(work: Promise<unknown>): void {
+  const guarded = work.catch((e) => console.error("background task failed", e instanceof Error ? e.message : e));
+  // deno-lint-ignore no-explicit-any
+  const runtime = (globalThis as any).EdgeRuntime;
+  if (runtime?.waitUntil) runtime.waitUntil(guarded);
+}
+
 export function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status,

@@ -1,8 +1,8 @@
 # AXE Admin (Android)
 
-The admin client for the AXE v2 backend. **Phases 1-2 of 5 are implemented**: admin sign-in with secure session
-storage, and request management (pending list, detail, payment screenshot, approve / reject).
-Notifications (FCM) and production hardening are **not implemented yet** (see [What remains](#what-remains)). The
+The admin client for the AXE v2 backend. **Phases 1-4 of 5 are implemented**: admin sign-in with secure session
+storage, request management (pending list, detail, payment screenshot, approve / reject), and push notifications
+(FCM) for new requests. Production hardening is **not implemented yet** (see [What remains](#what-remains)). The
 Windows side of the authorization workflow is documented in [`../AUTHORIZATION.md`](../AUTHORIZATION.md); this app did not
 change for it.
 
@@ -18,6 +18,7 @@ grants, expiry and all data deletion happen on the server; the Windows client re
 time and grant verification.
 
 ```
+push/        Push notifications: PushRegistrar (token lifecycle), PushModel (payload parsing, deep links, permission policy), FirebasePush (Firebase glue, messaging service)
 ui/          Compose screens: AppRoot, LoginScreen, AdminShell, RequestsScreen (list), RequestDetailScreen,
              Glyphs (drawn icons), Format, theme
 viewmodel/   AuthViewModel (login), RequestsViewModel (list, selection, detail, screenshot, decisions)
@@ -95,6 +96,20 @@ computes expiry, or alters amounts.
 
 **Signing out** wipes the list, the open request and its screenshot from memory.
 
+## Push notifications (Phase 4)
+
+The backend sends a minimal FCM notification ("New payment request received. Tap to review." plus `{type, requestId}`,
+nothing else) when a request is created; the app registers its FCM token with the authenticated backend, handles
+rotation and sign-out, and on a tap fetches the real request from the backend (stale taps get "That request is no longer
+available"). Foreground, background, terminated and signed-out behaviour, the permission flow, configuration and limits
+are in [`../NOTIFICATIONS.md`](../NOTIFICATIONS.md). Push is off (and everything else works) when the build has no
+Firebase configuration. The FCM server credential never enters the app.
+
+| Endpoint | Use |
+| --- | --- |
+| `POST {SUPABASE_URL}/functions/v1/admin/devices` `{token, previousToken?}` | register / rotate this device's FCM token (owner = the signed-in admin) |
+| `DELETE .../admin/devices` `{token}` | remove it at sign-out |
+
 ## Immediate data deletion
 
 Requests are temporary and all deletion is server-side. See [`../backend/DATA_LIFECYCLE.md`](../backend/DATA_LIFECYCLE.md):
@@ -124,6 +139,10 @@ Only the Supabase URL and the **public anon key** are compiled in, read (git-ign
 `AXE-Admin/local.properties` (`axe.supabaseUrl`, `axe.anonKey`; see `admin.config.example.properties`) or, failing that,
 `v2/config/server.json`. Never add the service-role key, database password, FCM credentials or signing keys.
 
+Optional push config (public Firebase client identifiers, not credentials): `axe.firebase.projectId|appId|apiKey|senderId`
+in `local.properties`, or a downloaded `app/google-services.json` (git-ignored). The `google-services` Gradle plugin is not
+used, so the app builds without a Firebase project.
+
 Local backend from a phone or emulator: `adb reverse tcp:54321 tcp:54321` and keep `http://127.0.0.1:54321`. Cleartext to
 loopback is allowed in **debug builds only**.
 
@@ -135,7 +154,7 @@ Requires JDK 17+ (Android Studio's JBR works) and the Android SDK (`ANDROID_HOME
 cd v2\AXE-Admin
 $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
 .\gradlew :app:assembleDebug          # app\build\outputs\apk\debug\app-debug.apk
-.\gradlew :app:testDebugUnitTest      # JVM unit tests (85)
+.\gradlew :app:testDebugUnitTest      # JVM unit tests (134)
 .\gradlew :app:lintDebug
 .\gradlew :app:assembleRelease        # minified, UNSIGNED (signing is Phase 5)
 $env:ANDROID_SERIAL = "<device serial>"; .\gradlew :app:connectedDebugAndroidTest   # Keystore tests on a device (4)
@@ -144,7 +163,7 @@ $env:ANDROID_SERIAL = "<device serial>"; .\gradlew :app:connectedDebugAndroidTes
 Backend tests (need the local Supabase stack and `functions serve`, see the header of `backend/tests/api.test.mjs`):
 
 ```powershell
-cd v2\backend; node --test tests/api.test.mjs    # 22 tests, incl. lifecycle, delivery and expiry tests against real DB/storage state
+cd v2\backend; node --test --test-concurrency=1 tests/api.test.mjs tests/push.test.mjs   # 22 + 18 tests (push tests need setup-local.mjs --fake-fcm, see NOTIFICATIONS.md)
 ```
 
 The JVM tests cover the repository and API parsing with backend-shaped JSON (list, detail, screenshot, decisions, all
@@ -167,7 +186,20 @@ decided elsewhere while open (shows "already handled", list refreshed); session 
 Not manually tested: offline/airplane-mode behaviour, token expiry mid-session, tablets / landscape, and the real
 production backend and account.
 
+## Phase 4 manual tests (Vivo V2129, Android 13, USB, local backend)
+
+Tested on the phone with **real pending requests** and simulated notification taps (`adb shell am start` with the same
+`type`/`requestId` extras an FCM tap carries): a tap while signed out (only the sign-in screen, then the request opens after
+signing in); a tap with the app in the background; a tap with the process killed (session restored, request opened); a stale
+tap after another admin handled the request ("That request is no longer available", list refreshed); malformed and
+foreign extras (ignored, no crash); the permission explanation shown once and the "Notifications are off" notice after
+declining, with no re-prompt after a restart.
+
+**Not tested, and not claimed:** delivery of a real FCM message (no Firebase project was available), real token
+registration from Firebase, the foreground `onMessageReceived` path on a device, the system notification itself, and the
+"Allow" branch of the system permission dialog. Those are covered by JVM tests of the logic and by backend tests against a
+fake FCM server only.
+
 ## What remains
 
-- **Phase 4**: FCM notifications (`POST/DELETE /admin/devices` with a real token) and notification lifecycle.
 - **Phase 5**: release signing, security/session review, offline polish, integration tests.

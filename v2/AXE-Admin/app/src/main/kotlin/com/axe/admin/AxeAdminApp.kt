@@ -11,5 +11,6 @@ class AxeAdminApp : Application() {
         super.onCreate()
         container = AppContainer(this)
         container.authRepository.restore()
+        container.startPush(this)
     }
 }

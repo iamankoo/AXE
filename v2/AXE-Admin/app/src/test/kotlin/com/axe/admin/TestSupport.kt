@@ -37,18 +37,24 @@ fun sessionOf(clock: TestClock, access: String = "access-1", refresh: String = "
     Session(access, refresh, clock.nowMs() + validForMs, "user-1", "admin@axe.local")
 
 /** Everything wired against a [MockWebServer], the way AppContainer wires the real app. */
-class Harness(val server: MockWebServer = MockWebServer(), val store: InMemorySessionStore = InMemorySessionStore(), val clock: TestClock = TestClock()) {
+class Harness(
+    val server: MockWebServer = MockWebServer(),
+    val store: InMemorySessionStore = InMemorySessionStore(),
+    val clock: TestClock = TestClock(),
+    beforeSignOut: suspend () -> Unit = {},
+) {
     init { server.start() }
 
     val config = BackendConfig(server.url("/").toString().trimEnd('/'), "anon-key")
-    private val client = OkHttpClient.Builder().callTimeout(5, TimeUnit.SECONDS).build()
+    private val client = OkHttpClient.Builder().callTimeout(20, TimeUnit.SECONDS).build()
     private val transport = HttpTransport(client)
     val authApi = AuthApi(config, transport)
     val adminApi = AdminApi(config, transport)
     val sessions = SessionManager(store, authApi, clock)
-    val auth = AuthRepository(sessions, authApi, adminApi, clock)
+    val auth = AuthRepository(sessions, authApi, adminApi, clock, beforeSignOut)
     val admin = AdminRepository(sessions, adminApi)
     val requests = BackendRequestRepository(sessions, adminApi)
+    val devices = com.axe.admin.push.BackendDeviceRepository(sessions, adminApi)
 
     /** Starts signed in with a valid stored session (no network involved). */
     fun signIn() { store.session = sessionOf(clock); sessions.restore() }

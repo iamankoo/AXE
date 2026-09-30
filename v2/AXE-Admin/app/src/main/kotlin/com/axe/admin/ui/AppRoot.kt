@@ -20,7 +20,7 @@ import com.axe.admin.viewmodel.RequestsViewModel
 
 /** Chooses the screen from the auth state. The server stays authoritative; this only reflects it. */
 @Composable
-fun AppRoot(configValid: Boolean, factory: ViewModelProvider.Factory) {
+fun AppRoot(configValid: Boolean, factory: ViewModelProvider.Factory, notifications: NotificationUi) {
     val background = Modifier.fillMaxSize()
     if (!configValid) {
         Box(background.padding(24.dp), contentAlignment = Alignment.Center) {
@@ -39,7 +39,7 @@ fun AppRoot(configValid: Boolean, factory: ViewModelProvider.Factory) {
         is AuthState.SignedOut -> LoginScreen(auth, s.reason)
         is AuthState.SignedIn -> {
             val requests: RequestsViewModel = viewModel(factory = factory)
-            AdminShell(s.email, requests, onLogout = auth::logout)
+            AdminShell(s.email, requests, notifications, onLogout = auth::logout)
         }
     }
 }

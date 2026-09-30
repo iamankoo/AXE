@@ -10,13 +10,18 @@
 //   POST   /admin/requests/:id/decision    {"decision":"approve"|"reject"}
 //   GET    /admin/grants                   active authorizations
 //   POST   /admin/grants/:jti/revoke       end an active authorization early
-//   POST   /admin/devices                  {"token": fcm token}   register for push
+//   POST   /admin/devices                  {"token": fcm token, "previousToken"?: old token}   register / rotate
 //   DELETE /admin/devices                  {"token": fcm token}   sign-out / unregister
+//
+// A device token belongs to the authenticated admin (taken from the session, never from the request). Registering is
+// idempotent, a rotated token replaces its predecessor, and each admin keeps at most MAX_DEVICES_PER_ADMIN tokens (the
+// most recently registered ones), so records cannot accumulate.
 
 import { cleanup, db, fail, json, PICKUP_TTL_MS, PLANS, route, SCREENSHOT_BUCKET } from "../_shared/common.ts";
 import { hmacHex } from "../_shared/crypto.ts";
 import { signClaims } from "../_shared/signing.ts";
 
+const MAX_DEVICES_PER_ADMIN = 5;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 Deno.serve(async (req) => {
@@ -218,11 +223,29 @@ async function revoke(jti: string): Promise<Response> {
   return json(200, { ok: true });
 }
 
+const validToken = (t: unknown): t is string => typeof t === "string" && t.length >= 20 && t.length <= 4096;
+
 async function registerDevice(req: Request, adminId: string): Promise<Response> {
-  const body = await req.json().catch(() => null) as { token?: string } | null;
+  const body = await req.json().catch(() => null) as { token?: unknown; previousToken?: unknown } | null;
   const token = body?.token;
-  if (typeof token !== "string" || token.length < 20 || token.length > 4096) return fail(400, "Bad token.");
-  await db().from("admin_devices").upsert({ token, user_id: adminId, updated_at: new Date().toISOString() });
+  const previous = body?.previousToken;
+  if (!validToken(token)) return fail(400, "Bad token.");
+  if (previous !== undefined && previous !== null && !validToken(previous)) return fail(400, "Bad token.");
+
+  const { error } = await db().from("admin_devices").upsert({ token, user_id: adminId, updated_at: new Date().toISOString() });
+  if (error) throw new Error(error.message);
+
+  // Token rotation: the old token of THIS admin is replaced (another admin's token can never be touched).
+  if (typeof previous === "string" && previous !== token) {
+    await db().from("admin_devices").delete().eq("token", previous).eq("user_id", adminId);
+  }
+
+  // Keep only this admin's most recent devices.
+  const { data: mine } = await db().from("admin_devices").select("token")
+    .eq("user_id", adminId).order("updated_at", { ascending: false });
+  const extra = (mine ?? []).slice(MAX_DEVICES_PER_ADMIN).map((d) => d.token as string);
+  if (extra.length) await db().from("admin_devices").delete().in("token", extra).eq("user_id", adminId);
+
   return json(200, { ok: true });
 }
 

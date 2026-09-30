@@ -12,7 +12,9 @@ import com.axe.admin.network.InvalidResponseException
 import com.axe.admin.network.NetworkException
 import com.axe.admin.network.RateLimitedException
 import com.axe.admin.network.UnauthorizedException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.withTimeoutOrNull
 
 enum class LoginFailure { InvalidCredentials, NotAnAdmin, RateLimited, Network, Server }
 
@@ -27,6 +29,8 @@ class AuthRepository(
     private val authApi: AuthApi,
     private val adminApi: AdminApi,
     private val clock: Clock = Clock.System,
+    /** Runs before the session is cleared, while the server can still authenticate it (e.g. to remove the push token). */
+    private val beforeSignOut: suspend () -> Unit = {},
 ) {
     val state: StateFlow<AuthState> get() = sessions.state
 
@@ -60,8 +64,20 @@ class AuthRepository(
 
     /** Ends the local session immediately, then revokes it on the server as a best effort. */
     suspend fun logout() {
+        // Best effort and bounded: signing out must never hang on the network or fail because of it.
+        try {
+            withTimeoutOrNull(SIGN_OUT_HOOK_TIMEOUT_MS) { beforeSignOut() }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // push clean-up problems never block signing out
+        }
         val token = sessions.clearForSignOut() ?: return
         runCatching { authApi.logout(token) }
+    }
+
+    private companion object {
+        const val SIGN_OUT_HOOK_TIMEOUT_MS = 6_000L
     }
 
     private fun ApiException.toLoginFailure(): LoginFailure = when (this) {

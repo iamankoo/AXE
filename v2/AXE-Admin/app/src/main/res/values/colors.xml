@@ -1,4 +1,5 @@
 <resources>
     <color name="axe_background">#0E1116</color>
+    <color name="axe_notification">#0B6BFF</color>
     <color name="ic_launcher_background">#0E1116</color>
 </resources>
