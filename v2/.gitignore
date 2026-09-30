@@ -1,0 +1,34 @@
+# ---- AXE v2 (in addition to the repository root .gitignore) ----
+
+# The only v2 distributable is built into release-v2/ and is never committed.
+release-v2/
+artifacts/
+
+# Secrets and per-deployment configuration: NEVER commit.
+secrets/
+config/server*.json
+*.pem
+*.key
+*.p8
+*.p12
+*.jks
+*.keystore
+.env
+.env.*
+!.env.example
+
+# Backend
+backend/node_modules/
+
+# Android (AXE-Admin)
+AXE-Admin/.gradle/
+AXE-Admin/**/build/
+AXE-Admin/local.properties
+AXE-Admin/.idea/
+AXE-Admin/**/google-services.json
+AXE-Admin/keystore.properties
+*.apk
+*.aab
+
+# Installer redistributable binaries
+installer/redist/

@@ -1,0 +1,53 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>AxeV2</RootNamespace>
+    <AssemblyName>AXE-v2</AssemblyName>
+    <ApplicationIcon>Assets\axe.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Product>AXE v2</Product>
+    <Description>Private Floating Browser</Description>
+    <Authors>Aniket Raj</Authors>
+    <Company>Aniket Raj</Company>
+    <Copyright>© Aniket Raj</Copyright>
+    <!-- The single authoritative AXE v2 version (semantic versioning). The installer, the
+         update manifest and the updater's comparison all read it from the built exe. -->
+    <Version>2.0.0</Version>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- WebView2Loader is statically linked by the WPF control on x64/arm64. -->
+    <WebView2LoaderPreference>Static</WebView2LoaderPreference>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4258.31" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\axe.ico" />
+    <!-- The owner's real payment QR (supplied asset; never generated). -->
+    <Resource Include="Assets\QR.jpeg" />
+  </ItemGroup>
+
+  <!--
+    Client-safe server configuration (functions URL, anon key, public verification keys),
+    produced per deployment and never committed. Override with -p:AxeServerConfig=path.
+    Without it AXE v2 still builds but reports that it isn't connected to a server.
+  -->
+  <PropertyGroup>
+    <AxeServerConfig Condition="'$(AxeServerConfig)' == ''">$(MSBuildThisFileDirectory)..\..\config\server.json</AxeServerConfig>
+  </PropertyGroup>
+  <ItemGroup Condition="Exists('$(AxeServerConfig)')">
+    <EmbeddedResource Include="$(AxeServerConfig)" LogicalName="AxeV2.server.json" Link="server.json" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="AxeV2.Tests" />
+  </ItemGroup>
+
+</Project>
