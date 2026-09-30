@@ -32,3 +32,6 @@ AXE-Admin/keystore.properties
 
 # Installer redistributable binaries
 installer/redist/
+
+# The Visual Studio "Debug/" rule in the root .gitignore must not hide the Android debug source set.
+!AXE-Admin/app/src/debug/

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Release / default: HTTPS only, system trust store only. The debug source set overrides this file
+     to additionally allow cleartext to loopback for local development. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>

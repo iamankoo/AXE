@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.AxeAdmin" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/axe_background</item>
+        <item name="android:statusBarColor">@color/axe_background</item>
+        <item name="android:navigationBarColor">@color/axe_background</item>
+    </style>
+</resources>

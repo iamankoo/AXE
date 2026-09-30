@@ -1,0 +1,132 @@
+package com.axe.admin.auth
+
+import android.content.Context
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import com.axe.admin.model.Session
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.json.Json
+import java.security.GeneralSecurityException
+import java.security.KeyStore
+import java.security.SecureRandom
+import java.util.Base64
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
+
+/** Persists the admin session. Implementations must never log or expose token values. */
+interface SessionStore {
+    fun load(): Session?
+    fun save(session: Session)
+    fun clear()
+}
+
+/** Where the (already encrypted) session blob lives. */
+interface BlobStorage {
+    fun read(): String?
+    fun write(value: String)
+    fun delete()
+}
+
+/** App-private SharedPreferences holding ONLY ciphertext (Base64). Nothing readable is stored. */
+class SharedPreferencesBlobStorage(context: Context) : BlobStorage {
+    private val prefs = context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+    override fun read(): String? = prefs.getString(KEY, null)
+    override fun write(value: String) { prefs.edit().putString(KEY, value).apply() }
+    override fun delete() { prefs.edit().remove(KEY).apply() }
+
+    private companion object {
+        const val FILE = "axe_admin_session"
+        const val KEY = "blob"
+    }
+}
+
+/**
+ * AES-256-GCM with a random 96-bit IV per message (prepended to the ciphertext). The key comes from
+ * [keyProvider]; in production that is a non-exportable Android Keystore key, in tests a software key.
+ */
+class AesGcmCipher(private val keyProvider: () -> SecretKey) {
+    private val random = SecureRandom()
+
+    fun encrypt(plain: ByteArray): ByteArray {
+        val iv = ByteArray(IV_BYTES).also(random::nextBytes)
+        val cipher = Cipher.getInstance(TRANSFORM)
+        cipher.init(Cipher.ENCRYPT_MODE, keyProvider(), GCMParameterSpec(TAG_BITS, iv))
+        return iv + cipher.doFinal(plain)
+    }
+
+    /** @throws GeneralSecurityException if the blob is corrupt, tampered with, or the key changed */
+    fun decrypt(blob: ByteArray): ByteArray {
+        if (blob.size <= IV_BYTES) throw GeneralSecurityException("blob too short")
+        val cipher = Cipher.getInstance(TRANSFORM)
+        cipher.init(Cipher.DECRYPT_MODE, keyProvider(), GCMParameterSpec(TAG_BITS, blob.copyOfRange(0, IV_BYTES)))
+        return cipher.doFinal(blob, IV_BYTES, blob.size - IV_BYTES)
+    }
+
+    private companion object {
+        const val TRANSFORM = "AES/GCM/NoPadding"
+        const val IV_BYTES = 12
+        const val TAG_BITS = 128
+    }
+}
+
+/** Creates/loads the non-exportable AES key held by the Android Keystore. */
+object KeystoreKeyProvider {
+    private const val ALIAS = "axe_admin_session_key"
+    private const val PROVIDER = "AndroidKeyStore"
+
+    @Synchronized
+    fun key(): SecretKey {
+        val store = KeyStore.getInstance(PROVIDER).apply { load(null) }
+        (store.getKey(ALIAS, null) as? SecretKey)?.let { return it }
+        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, PROVIDER)
+        generator.init(
+            KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .setRandomizedEncryptionRequired(true)
+                .build(),
+        )
+        return generator.generateKey()
+    }
+}
+
+/**
+ * Session persistence: JSON, then AES-GCM (Keystore key), then Base64 into [BlobStorage].
+ * A blob that cannot be decrypted or parsed (corruption, lost key, app data restored elsewhere) is
+ * discarded and treated as "no session", so the admin simply signs in again.
+ */
+class EncryptedSessionStore(
+    private val storage: BlobStorage,
+    private val cipher: AesGcmCipher,
+    private val json: Json = Json { ignoreUnknownKeys = true },
+) : SessionStore {
+
+    override fun load(): Session? {
+        val stored = storage.read() ?: return null
+        return try {
+            val plain = cipher.decrypt(Base64.getDecoder().decode(stored))
+            json.decodeFromString(Session.serializer(), plain.decodeToString())
+        } catch (_: GeneralSecurityException) {
+            discard()
+        } catch (_: SerializationException) {
+            discard()
+        } catch (_: IllegalArgumentException) {
+            discard()
+        }
+    }
+
+    override fun save(session: Session) {
+        val plain = json.encodeToString(Session.serializer(), session).encodeToByteArray()
+        storage.write(Base64.getEncoder().encodeToString(cipher.encrypt(plain)))
+    }
+
+    override fun clear() = storage.delete()
+
+    private fun discard(): Session? {
+        storage.delete()
+        return null
+    }
+}
