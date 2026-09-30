@@ -215,6 +215,15 @@ async function status(req: Request, id: string): Promise<Response> {
     now: Date.now(),
     grant: state === "approved" ? request.grant_token : null,
   });
+
+  // Delete on pickup: a decided request's result stub has done its job once the signed result is in hand
+  // (an approval's active authorization lives on in access_grants). The token is signed first, so a failure
+  // above deletes nothing; a failed delete here is logged and the stub is removed by the expiry cleanup.
+  if (state === "approved" || state === "rejected") {
+    if (request.screenshot_path) await db().storage.from(SCREENSHOT_BUCKET).remove([request.screenshot_path]);
+    const { error } = await db().from("access_requests").delete().eq("id", id).in("status", ["approved", "rejected"]);
+    if (error) console.error("decided request delete failed", error.message);
+  }
   return json(200, { token });
 }
 

@@ -1,103 +1,172 @@
 # AXE Admin (Android)
 
-The admin client for the AXE v2 backend. **Phase 1 of 5: foundation only.** It signs an admin in,
-keeps the session securely, and shows an authenticated shell with a Requests placeholder.
-Request management, approve/reject, and push notifications are **not implemented yet** (see
-[What remains](#what-remains)).
+The admin client for the AXE v2 backend. **Phases 1-2 of 5 are implemented**: admin sign-in with secure session
+storage, and request management (pending list, detail, payment screenshot, approve / reject).
+Notifications (FCM), the end-to-end Windows authorization workflow polish, and production hardening are **not
+implemented yet** (see [What remains](#what-remains)).
 
-- Location: `v2/AXE-Admin/` (separate Gradle project; nothing in AXE v1 or the Windows app changed)
+- Location: `v2/AXE-Admin/` (separate Gradle project; AXE v1 is untouched)
 - App name: **AXE Admin**; package / applicationId: `com.axe.admin`
 - Kotlin 2.2, Jetpack Compose + Material 3 (dark only), min SDK 26, compile/target SDK 36
-- Dependencies: OkHttp, kotlinx.serialization, coroutines, AndroidX lifecycle. No DI framework, no Room.
+- Dependencies: OkHttp, kotlinx.serialization, coroutines, AndroidX lifecycle. No DI framework, no Room, no icon fonts.
 
 ## Architecture
 
-The Android app is an **admin client of the existing backend**. It holds no authorization logic:
-signed grants, trusted time, and decisions stay on the server and in the Windows client.
+The Android app is an **admin client of the existing backend**. It holds no authorization logic: decisions, signed
+grants, expiry and all data deletion happen on the server; the Windows client remains the authority for polling, trusted
+time and grant verification.
 
 ```
-ui/          Compose screens (AppRoot, LoginScreen, AdminShell, RequestsScreen), theme
-viewmodel/   AuthViewModel (login state), ShellViewModel (backend status)
-repository/  AuthRepository (login/logout), AdminRepository (backend check)
+ui/          Compose screens: AppRoot, LoginScreen, AdminShell, RequestsScreen (list), RequestDetailScreen,
+             Glyphs (drawn icons), Format, theme
+viewmodel/   AuthViewModel (login), RequestsViewModel (list, selection, detail, screenshot, decisions)
+repository/  AuthRepository, AdminRepository, RequestRepository (+ BackendRequestRepository)
 auth/        SessionManager (restore, refresh, sign-out, AuthState), SecureStorage (encrypted persistence)
-network/     HttpTransport (only place that does HTTP), AuthApi (Supabase Auth), AdminApi (admin function)
-model/       Session, AuthState
+network/     HttpTransport (only place that does HTTP), AuthApi (Supabase Auth), AdminApi (admin function), DTOs
+model/       Session, AuthState, AccessRequest, Decision
 data/        AppContainer (manual wiring)
 ```
 
-The UI never makes HTTP calls; it talks to view models, which talk to repositories.
+The UI never makes HTTP calls; composables only render ViewModel state.
 
 ## Backend contract used
 
-Derived from `v2/backend/supabase/functions/admin/index.ts` and checked against the local backend.
+Derived from `v2/backend/supabase/functions/admin/index.ts` and checked against the local backend. All admin calls send
+`apikey: <anon key>` and `Authorization: Bearer <access token>`; `401` = invalid token or not an admin.
 
-| Purpose | Request | Notes |
+| Purpose | Request | Result |
 | --- | --- | --- |
-| Sign in | `POST {SUPABASE_URL}/auth/v1/token?grant_type=password` | header `apikey: <anon key>`, body `{email,password}` |
-| Refresh | `POST .../auth/v1/token?grant_type=refresh_token` | body `{refresh_token}`; Supabase rotates refresh tokens |
-| Sign out | `POST .../auth/v1/logout?scope=local` | ends only this device's session |
-| Admin check / connectivity | `DELETE {SUPABASE_URL}/functions/v1/admin/devices` with body `{}` | `Authorization: Bearer <access token>`; 200 = listed admin, 401 = not an admin / invalid token |
+| Sign in | `POST {SUPABASE_URL}/auth/v1/token?grant_type=password` body `{email,password}` | tokens |
+| Refresh | `POST .../auth/v1/token?grant_type=refresh_token` body `{refresh_token}` | tokens (rotating) |
+| Sign out | `POST .../auth/v1/logout?scope=local` | ends this device's session |
+| Admin check | `DELETE {SUPABASE_URL}/functions/v1/admin/devices` body `{}` | `200 {"ok":true}` for a listed admin |
+| List | `GET .../functions/v1/admin/requests` | `{requests:[...]}` pending, unexpired, oldest first (max 100) |
+| Detail | `GET .../admin/requests/:id` | `{request:{..., hasScreenshot}}`; `404` if not pending |
+| Screenshot | `GET .../admin/requests/:id/screenshot` | raw image bytes (`no-store`); `404` if none / decided |
+| Decision | `POST .../admin/requests/:id/decision` body `{"decision":"approve"\|"reject"}` | `200 {ok, decision, expiresAt}`; `409` already handled / expired |
 
-There is no dedicated "who am I" admin endpoint. `DELETE /admin/devices` with no `token` authenticates
-the caller and then does nothing, so it is used as a side-effect-free admin check. A `GET /admin/me`
-would be cleaner and can replace it later without touching the UI.
+The admin check still uses `DELETE /admin/devices` with an empty body (no dedicated "who am I" endpoint exists); it
+authenticates and then does nothing. Phase 2 did not change it.
 
-## Authentication flow
+`expiresAt` in the decision response is the *grant's* expiry. Android deliberately does not parse, show or compute it.
 
-1. The admin enters email and password. The password is held only in a Compose `remember` (never saved instance state, never in a ViewModel, never logged).
-2. Supabase Auth `password` grant returns access + refresh tokens. The existing admin account lives only in Supabase Auth.
-3. The backend is asked whether the account is an admin (`/admin/devices` above). A valid account that is **not** in `public.admins` is rejected, its fresh session is revoked, and nothing is persisted.
-4. The session is encrypted and stored; `AuthState` becomes `SignedIn`.
-5. On app start the stored session is restored without network. It is validated lazily: the shell checks the backend on entry.
-6. Before any admin call the access token is refreshed if it expires within 60 s (refreshes are serialized; refresh tokens rotate). A `401` triggers one refresh and one retry.
-7. Refresh rejected, so signed out with "session expired". A `401` again after a fresh token, so signed out with "no longer allowed" (admin access revoked). Network/server failures never sign the admin out.
-8. Logout clears the local session immediately, then revokes it on the server as a best effort.
+## Request model (`AccessRequest`)
 
-## Secure storage
+Exactly the fields the backend returns (`present()` in `admin/index.ts`); nothing is invented.
 
-The session JSON is encrypted with **AES-256-GCM** (random 96-bit IV per write) using a
-**non-exportable Android Keystore key**, and only the Base64 ciphertext is written to app-private
-storage. No token is ever in plain `SharedPreferences`. A blob that fails to decrypt (tamper,
-lost key) is deleted and treated as signed out. Other hygiene: `allowBackup=false` and data-extraction
-rules exclude everything; `FLAG_SECURE` blocks screenshots/recents thumbnails; `Session.toString()` is
-redacted; no HTTP logging interceptor exists; OkHttp uses the system trust store with normal hostname
-verification; release builds forbid cleartext HTTP.
+| Field | Notes |
+| --- | --- |
+| `id` | UUID; shown shortened ("Request ID: A3FCC9B2") |
+| `kind` | `payment` / `invite` (unknown values render as a generic "Request") |
+| `name`, `plan`, `planLabel` | blank name treated as missing |
+| `expectedAmount` | server price for the plan (rupees) |
+| `amountPaid`, `utr` | payment only; null otherwise |
+| `amountMismatch`, `duplicateUtr` | server-computed warnings |
+| `inviteCode` | invitation only |
+| `createdAt`, `expiresAt` | unparseable timestamps become null instead of failing the list |
+| `hasScreenshot` | detail endpoint only |
+
+There is **no status field**: the backend lists only pending requests, so every listed request is pending (the
+"Pending" pill states that). The backend does not return device information, so none is shown.
+
+## Flows
+
+**List.** On entering the shell the ViewModel loads once (repeat calls while a load is in flight are ignored). States:
+loading, empty ("No pending requests"), error with retry, and the list (a failed refresh keeps the last list with a
+warning). Refresh is the square button or the bottom button. Cards show the kind (orange payment / purple invitation),
+name, plan (and price for payments), age, and the server's warnings.
+
+**Detail.** Tapping a card shows the list row immediately, then fetches the detail. Payment and invitation requests show
+their own fields; payments show the screenshot card. A request that is no longer pending (`404`) shows a message and
+refreshes the list.
+
+**Screenshot.** Fetched through the authenticated admin endpoint (never directly from Supabase Storage), held in memory
+only, validated as an image, decoded off the main thread and downsampled to ≤1600 px wide. It is never written to disk
+(no OkHttp cache is configured; the server sends `no-store`) and is dropped when the detail closes or the admin signs
+out. Missing / invalid / network / server problems are shown separately with a retry where it makes sense.
+
+**Decision.** Approve and Reject both ask for confirmation, then send only `{"decision": ...}`. While in flight the
+buttons are disabled and back is blocked; a second tap is ignored. On success the request leaves the list and the list
+is **re-fetched from the server** (an older refresh still in flight is cancelled so it cannot resurrect the row). On
+`409`/`404` the app says the request was already handled, closes the detail and refreshes; it never reports a success it
+did not get. Other failures keep the request open, show the error and restore the buttons. Android never creates a grant,
+computes expiry, or alters amounts.
+
+**Signing out** wipes the list, the open request and its screenshot from memory.
+
+## Immediate data deletion
+
+Requests are temporary and all deletion is server-side. See [`../backend/DATA_LIFECYCLE.md`](../backend/DATA_LIFECYCLE.md):
+at decision the server clears all request/payment data and deletes the screenshot; the remaining result stub is deleted
+the moment the Windows client collects its result; there is no archive or soft delete. The Android app only displays
+what the server returns.
+
+## Authentication flow and secure storage
+
+1. Email + password go to Supabase Auth (`password` grant). The password lives only in a Compose `remember` (never in a
+   ViewModel, saved state, or logs). The app contains no account credentials; the backend validates them.
+2. The backend is asked whether the account is an admin. A valid non-admin account is rejected and its session revoked.
+3. The session is encrypted and stored. On start it is restored without network and validated lazily.
+4. Access tokens refresh automatically (serialized; refresh tokens rotate). A `401` triggers one refresh and one retry.
+   Refresh rejected → "session expired"; `401` again with a fresh token → "no longer allowed". Offline never signs out.
+5. Logout clears locally at once, then revokes on the server best-effort.
+
+The session is encrypted with **AES-256-GCM** under a **non-exportable Android Keystore key**; only Base64 ciphertext is
+stored. The cipher chooses the IV (Keystore keys reject a caller-provided IV). Also: no backups, `FLAG_SECURE` on
+**release** builds (blocks screenshots / recents thumbnails; debug builds omit it so they can be inspected with
+`adb screencap`), redacted `Session.toString()`, no HTTP logging, system trust store, no cleartext in release.
 
 ## Configuration (client-safe only)
 
-Only the Supabase URL and the **public anon key** are compiled in. The build reads, in order:
+Only the Supabase URL and the **public anon key** are compiled in, read (git-ignored) from
+`AXE-Admin/local.properties` (`axe.supabaseUrl`, `axe.anonKey`; see `admin.config.example.properties`) or, failing that,
+`v2/config/server.json`. Never add the service-role key, database password, FCM credentials or signing keys.
 
-1. `AXE-Admin/local.properties`: `axe.supabaseUrl=...` and `axe.anonKey=...` (see `admin.config.example.properties`)
-2. `v2/config/server.json` (written by `v2/backend/scripts/setup-local.mjs`): URL derived from `functionsUrl`, plus `anonKey`
-
-Both files are git-ignored. **Never** add the service-role key, database password, FCM credentials,
-or signing keys. The app refuses to start (shows a configuration message) if the URL is not HTTPS
-(loopback HTTP is accepted for local development) or the key is missing.
-
-Local backend from a phone/emulator: run `adb reverse tcp:54321 tcp:54321` and keep `http://127.0.0.1:54321`.
-Cleartext to loopback is allowed in **debug builds only** (`app/src/debug/res/xml/network_security_config.xml`).
+Local backend from a phone or emulator: `adb reverse tcp:54321 tcp:54321` and keep `http://127.0.0.1:54321`. Cleartext to
+loopback is allowed in **debug builds only**.
 
 ## Build and test
 
-Requires JDK 17+ (Android Studio's bundled JBR works) and the Android SDK (set `ANDROID_HOME` or `sdk.dir`).
+Requires JDK 17+ (Android Studio's JBR works) and the Android SDK (`ANDROID_HOME`).
 
 ```powershell
 cd v2\AXE-Admin
 $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
-.\gradlew :app:assembleDebug        # app\build\outputs\apk\debug\app-debug.apk
-.\gradlew :app:testDebugUnitTest    # JVM unit tests (40)
-.\gradlew :app:lintDebug            # lint
-.\gradlew :app:assembleRelease      # minified, UNSIGNED (signing is Phase 5)
+.\gradlew :app:assembleDebug          # app\build\outputs\apk\debug\app-debug.apk
+.\gradlew :app:testDebugUnitTest      # JVM unit tests (85)
+.\gradlew :app:lintDebug
+.\gradlew :app:assembleRelease        # minified, UNSIGNED (signing is Phase 5)
+$env:ANDROID_SERIAL = "<device serial>"; .\gradlew :app:connectedDebugAndroidTest   # Keystore tests on a device (4)
 ```
 
-Unit tests cover login success/failure (wrong credentials, non-admin, rate limit, server error,
-malformed response, network failure), logout, session restore, refresh/expiry/revocation, offline
-handling, AES-GCM storage (round trip, no plaintext, tamper, wrong key), view-model state, and config validation.
-The Android Keystore key itself is not exercised by JVM tests; it needs a device/emulator.
+Backend tests (need the local Supabase stack and `functions serve`, see the header of `backend/tests/api.test.mjs`):
+
+```powershell
+cd v2\backend; node --test tests/api.test.mjs    # 14 tests, incl. the data-lifecycle tests against real DB/storage state
+```
+
+The JVM tests cover the repository and API parsing with backend-shaped JSON (list, detail, screenshot, decisions, all
+failure modes), the ViewModel state machine (loading, selection, decisions, duplicates, conflicts, stale refresh,
+sign-out wipe), and the Phase 1 auth/session/storage tests. The instrumented test exercises the real Keystore, which a
+JVM software key cannot (it caught a Phase 1 bug: see below).
+
+## Phase 1 issue found and fixed during Phase 2
+
+Sign-in never completed on a real device: saving the session threw `InvalidAlgorithmParameterException: Caller-provided
+IV not permitted`, because the Keystore key requires randomized encryption and the code supplied its own IV. JVM tests
+missed it (software keys allow it). Fixed in `AesGcmCipher.encrypt` (the cipher now generates the IV); the instrumented
+test fails on the old code and passes on the fix.
+
+## Manually tested (Vivo V2129, Android 13, USB, local backend through `adb reverse`)
+
+Sign-in; list; refresh; payment detail with screenshot; invitation detail; cancel on a confirmation; reject; approve (each
+checked against the real database/storage: request data null, screenshot gone, grant created only on approve); a request
+decided elsewhere while open (shows "already handled", list refreshed); session restore after killing the app; sign-out.
+Not manually tested: offline/airplane-mode behaviour, token expiry mid-session, tablets / landscape, and the real
+production backend and account.
 
 ## What remains
 
-- **Phase 2**: pending-request list, request details, payment screenshot viewing, approve/reject UI (`GET /admin/requests`, `.../screenshot`, `POST .../decision`).
-- **Phase 3**: end-to-end Windows, backend, Android authorization workflow.
-- **Phase 4**: FCM notifications (`POST/DELETE /admin/devices` with a real token), cleanup lifecycle.
+- **Phase 3**: end-to-end Windows ↔ backend ↔ Android workflow verification (the Windows client is unchanged).
+- **Phase 4**: FCM notifications (`POST/DELETE /admin/devices` with a real token) and notification lifecycle.
 - **Phase 5**: release signing, security/session review, offline polish, integration tests.

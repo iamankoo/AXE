@@ -16,7 +16,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.axe.admin.model.AuthState
 import com.axe.admin.viewmodel.AuthViewModel
-import com.axe.admin.viewmodel.ShellViewModel
+import com.axe.admin.viewmodel.RequestsViewModel
 
 /** Chooses the screen from the auth state. The server stays authoritative; this only reflects it. */
 @Composable
@@ -38,8 +38,8 @@ fun AppRoot(configValid: Boolean, factory: ViewModelProvider.Factory) {
         AuthState.Restoring -> Box(background, contentAlignment = Alignment.Center) { CircularProgressIndicator() }
         is AuthState.SignedOut -> LoginScreen(auth, s.reason)
         is AuthState.SignedIn -> {
-            val shell: ShellViewModel = viewModel(factory = factory)
-            AdminShell(s.email, shell, onLogout = auth::logout)
+            val requests: RequestsViewModel = viewModel(factory = factory)
+            AdminShell(s.email, requests, onLogout = auth::logout)
         }
     }
 }

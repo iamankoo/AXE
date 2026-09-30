@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import { createHash, createPublicKey, randomBytes, verify } from "node:crypto";
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deflateSync } from "node:zlib";
@@ -265,4 +266,207 @@ test("input validation", async () => {
   assert.equal(await bad({ kind: "payment", name: "Test", plan: "1h", amountPaid: 149, utr: "!!", device: device(),
     screenshot: { type: "image/png", data: testPng().toString("base64") } }), 400);
   assert.equal(await bad({ kind: "invite", name: "Test", plan: "1h", code: "PAPAJI500", device: "not-a-device" }), 400);
+});
+
+// ---------------------------------------------------------------------------------------------------
+// DATA LIFECYCLE (core product requirement): payment / invitation data is temporary. These tests read
+// the ACTUAL database rows and storage objects with the local service-role key (obtained from the
+// Supabase CLI at run time, never written to disk) instead of trusting API responses.
+// ---------------------------------------------------------------------------------------------------
+
+let serviceCtx;
+function service() {
+  if (!serviceCtx) {
+    const st = JSON.parse(execFileSync("npx", ["--yes", "supabase", "status", "-o", "json"], {
+      cwd: join(v2, "backend"), encoding: "utf8", shell: true, stdio: ["ignore", "pipe", "ignore"],
+    }));
+    serviceCtx = { url: st.API_URL, key: st.SERVICE_ROLE_KEY };
+  }
+  return serviceCtx;
+}
+const serviceHeaders = () => ({ apikey: service().key, Authorization: `Bearer ${service().key}`, "Content-Type": "application/json" });
+
+/** Rows straight from Postgres (PostgREST with the service role). */
+async function rows(table, filter) {
+  const res = await fetch(`${service().url}/rest/v1/${table}?${filter}&select=*`, { headers: serviceHeaders() });
+  assert.equal(res.status, 200, `reading ${table}`);
+  return res.json();
+}
+
+/** Objects actually present in the private screenshot bucket for one request. */
+async function storedScreenshots(requestId) {
+  const res = await fetch(`${service().url}/storage/v1/object/list/payment-screenshots`, {
+    method: "POST", headers: serviceHeaders(), body: JSON.stringify({ prefix: requestId, limit: 100 }),
+  });
+  assert.equal(res.status, 200, "listing storage");
+  return (await res.json()).filter((o) => o.name);
+}
+
+async function submitPayment(name) {
+  const dev = device();
+  const res = await call("POST", `${base}/requests`, {
+    kind: "payment", name, plan: "5h", amountPaid: 199, utr: `LIFE${Date.now()}${randomBytes(3).toString("hex")}`, device: dev,
+    screenshot: { type: "image/png", data: testPng().toString("base64") },
+  });
+  assert.equal(res.status, 201, JSON.stringify(res.body));
+  return { ...res.body, dev };
+}
+
+async function submitInvite(name) {
+  const res = await call("POST", `${base}/requests`, { kind: "invite", name, plan: "1h", code: "PAPAJI500", device: device() });
+  assert.equal(res.status, 201, JSON.stringify(res.body));
+  return res.body;
+}
+
+const inAdminList = async (id) => (await adminCall("GET", "/requests")).body.requests.some((r) => r.id === id);
+const HOURS_24 = 24 * 3600_000;
+
+test("lifecycle: approval clears all request data at once, delivers the grant, and the stub is deleted on pickup", async () => {
+  const { requestId, pollToken } = await submitPayment("Test Lifecycle Approve");
+
+  // Sanity: the helpers see the temporary data while the request is pending.
+  const [pending] = await rows("access_requests", `id=eq.${requestId}`);
+  assert.equal(pending.status, "pending");
+  assert.ok(pending.name && pending.utr && pending.amount_paid && pending.screenshot_path);
+  assert.equal((await storedScreenshots(requestId)).length, 1, "screenshot object exists while pending");
+
+  const before = Date.now();
+  assert.equal((await adminCall("POST", `/requests/${requestId}/decision`, { decision: "approve" })).status, 200);
+
+  // At the moment of decision (server-side, before anyone polls): only a minimal result stub is left.
+  const [stub] = await rows("access_requests", `id=eq.${requestId}`);
+  assert.equal(stub.status, "approved");
+  for (const field of ["name", "amount_paid", "utr", "invite_code", "screenshot_path"]) {
+    assert.equal(stub[field], null, `${field} must be cleared at decision time`);
+  }
+  assert.equal(stub.duplicate_utr, false, "temporary verification data is cleared too");
+  assert.ok(stub.grant_token, "the signed result is stored for the Windows client");
+  const hardCap = new Date(stub.expires_at).getTime();
+  assert.ok(hardCap > before && hardCap <= Date.now() + HOURS_24 + 5000, "stub is capped at the pickup window");
+  assert.equal((await storedScreenshots(requestId)).length, 0, "screenshot object is deleted from storage");
+  assert.equal(await inAdminList(requestId), false, "a decided request is not in GET /admin/requests");
+  assert.equal((await adminCall("GET", `/requests/${requestId}`)).status, 404);
+
+  // The Windows client picks up the result.
+  const status = await poll(requestId, pollToken);
+  assert.equal(status.status, "approved");
+  const grant = verified(status.grant, "axe-grant");
+
+  // Pickup deletes the request row entirely; only the ACTIVE authorization remains.
+  assert.deepEqual(await rows("access_requests", `id=eq.${requestId}`), [], "request record is gone after pickup");
+  const grants = await rows("access_grants", `request_id=eq.${requestId}`);
+  assert.equal(grants.length, 1, "the active authorization is retained");
+  assert.equal(grants[0].jti, grant.jti);
+  assert.equal((await session(status.grant)).valid, true, "the grant still validates without the request row");
+
+  // The result is delivered once; nothing is recreated by asking again.
+  assert.equal((await call("GET", `${base}/requests/${requestId}?nonce=${nonce()}`, null, { "x-poll-token": pollToken })).status, 404);
+  assert.deepEqual(await rows("access_requests", `id=eq.${requestId}`), []);
+  assert.equal(await inAdminList(requestId), false);
+});
+
+test("lifecycle: rejection clears all request data, delivers the rejection, then deletes the stub", async () => {
+  const { requestId, pollToken } = await submitPayment("Test Lifecycle Reject");
+  assert.equal((await storedScreenshots(requestId)).length, 1);
+
+  assert.equal((await adminCall("POST", `/requests/${requestId}/decision`, { decision: "reject" })).status, 200);
+
+  const [stub] = await rows("access_requests", `id=eq.${requestId}`);
+  assert.equal(stub.status, "rejected");
+  assert.equal(stub.grant_token, null);
+  for (const field of ["name", "amount_paid", "utr", "invite_code", "screenshot_path"]) assert.equal(stub[field], null, field);
+  assert.equal(stub.duplicate_utr, false);
+  assert.equal((await storedScreenshots(requestId)).length, 0);
+  assert.equal(await inAdminList(requestId), false);
+
+  const status = await poll(requestId, pollToken);
+  assert.equal(status.status, "rejected", "the rejection reaches the Windows client");
+  assert.equal(status.grant, null);
+
+  assert.deepEqual(await rows("access_requests", `id=eq.${requestId}`), [], "request record is gone after pickup");
+  assert.deepEqual(await rows("access_grants", `request_id=eq.${requestId}`), [], "a rejection never creates an authorization");
+});
+
+test("lifecycle: invitation requests follow the same lifecycle", async () => {
+  const { requestId, pollToken } = await submitInvite("Test Lifecycle Invite");
+  const [pending] = await rows("access_requests", `id=eq.${requestId}`);
+  assert.equal(pending.invite_code, "PAPAJI500");
+
+  assert.equal((await adminCall("POST", `/requests/${requestId}/decision`, { decision: "approve" })).status, 200);
+  const [stub] = await rows("access_requests", `id=eq.${requestId}`);
+  assert.equal(stub.invite_code, null);
+  assert.equal(stub.name, null);
+
+  assert.equal((await poll(requestId, pollToken)).status, "approved");
+  assert.deepEqual(await rows("access_requests", `id=eq.${requestId}`), []);
+});
+
+test("lifecycle: screenshot storage holds nothing for processed requests", async () => {
+  const a = await submitPayment("Test Storage A");
+  const b = await submitPayment("Test Storage B");
+  assert.equal((await storedScreenshots(a.requestId)).length + (await storedScreenshots(b.requestId)).length, 2);
+
+  await adminCall("POST", `/requests/${a.requestId}/decision`, { decision: "approve" });
+  await adminCall("POST", `/requests/${b.requestId}/decision`, { decision: "reject" });
+  assert.equal((await storedScreenshots(a.requestId)).length, 0, "empty right after the decision, before any pickup");
+  assert.equal((await storedScreenshots(b.requestId)).length, 0);
+
+  await poll(a.requestId, a.pollToken);
+  await poll(b.requestId, b.pollToken);
+  assert.equal((await storedScreenshots(a.requestId)).length, 0);
+  assert.equal((await storedScreenshots(b.requestId)).length, 0);
+});
+
+test("lifecycle: repeating or racing decisions can never recreate history or extra grants", async () => {
+  // A decided-and-delivered request: deciding again is refused and recreates nothing.
+  const done = await submitPayment("Test Repeat Approve");
+  await adminCall("POST", `/requests/${done.requestId}/decision`, { decision: "approve" });
+  await poll(done.requestId, done.pollToken);
+  assert.equal((await adminCall("POST", `/requests/${done.requestId}/decision`, { decision: "approve" })).status, 409);
+  assert.equal((await adminCall("POST", `/requests/${done.requestId}/decision`, { decision: "reject" })).status, 409);
+  assert.deepEqual(await rows("access_requests", `id=eq.${done.requestId}`), []);
+  assert.equal((await rows("access_grants", `request_id=eq.${done.requestId}`)).length, 1, "still exactly one grant");
+
+  // A rejected request cannot later be approved into existence.
+  const rejected = await submitPayment("Test Reject Then Approve");
+  await adminCall("POST", `/requests/${rejected.requestId}/decision`, { decision: "reject" });
+  await poll(rejected.requestId, rejected.pollToken);
+  assert.equal((await adminCall("POST", `/requests/${rejected.requestId}/decision`, { decision: "approve" })).status, 409);
+  assert.deepEqual(await rows("access_grants", `request_id=eq.${rejected.requestId}`), []);
+
+  // Two admins tapping at once: exactly one wins, exactly one grant exists.
+  const raced = await submitPayment("Test Race");
+  const results = await Promise.all([
+    adminCall("POST", `/requests/${raced.requestId}/decision`, { decision: "approve" }),
+    adminCall("POST", `/requests/${raced.requestId}/decision`, { decision: "approve" }),
+  ]);
+  assert.deepEqual(results.map((r) => r.status).sort(), [200, 409]);
+  assert.equal((await rows("access_grants", `request_id=eq.${raced.requestId}`)).length, 1);
+  await poll(raced.requestId, raced.pollToken);
+  assert.deepEqual(await rows("access_requests", `id=eq.${raced.requestId}`), []);
+});
+
+test("lifecycle: failed or refused decisions delete nothing", async () => {
+  const { requestId, pollToken } = await submitPayment("Test Not Decided");
+
+  const refused = [
+    await call("POST", `${adminBase}/requests/${requestId}/decision`, { decision: "approve" }), // no session
+    await call("POST", `${adminBase}/requests/${requestId}/decision`, { decision: "approve" }, { Authorization: "Bearer not-a-token" }),
+    await adminCall("POST", `/requests/${requestId}/decision`, { decision: "maybe" }),
+    await adminCall("POST", `/requests/${requestId}/decision`, {}),
+    await adminCall("POST", `/requests/not-a-uuid/decision`, { decision: "approve" }),
+  ];
+  assert.deepEqual(refused.map((r) => r.status), [401, 401, 400, 400, 404]);
+  assert.equal((await poll(requestId, pollToken)).status, "pending", "polling a pending request changes nothing");
+
+  const [row] = await rows("access_requests", `id=eq.${requestId}`);
+  assert.equal(row.status, "pending");
+  assert.ok(row.name && row.utr && row.amount_paid && row.screenshot_path, "request data is intact");
+  assert.equal((await storedScreenshots(requestId)).length, 1, "screenshot is intact");
+  assert.equal(await inAdminList(requestId), true);
+  assert.deepEqual(await rows("access_grants", `request_id=eq.${requestId}`), [], "no grant was minted");
+
+  await call("DELETE", `${base}/requests/${requestId}`, null, { "x-poll-token": pollToken });
+  assert.deepEqual(await rows("access_requests", `id=eq.${requestId}`), []);
+  assert.equal((await storedScreenshots(requestId)).length, 0, "withdrawing also deletes the screenshot");
 });

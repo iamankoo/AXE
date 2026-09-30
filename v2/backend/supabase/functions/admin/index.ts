@@ -160,17 +160,21 @@ async function decide(req: Request, id: string, adminId: string): Promise<Respon
   }
 
   // Conditional update: only a still-pending request can be decided (no double decisions).
+  // The decided row becomes a minimal RESULT STUB for the Windows client (id, poll-token hash, status, signed
+  // grant). All request/payment data is cleared here, server-side, regardless of what the admin app does next.
+  // The stub itself is deleted the moment the client picks up its result (see access/index.ts), with
+  // PICKUP_TTL_MS as the hard cap if the PC never comes back. screenshot_path is kept until the object is
+  // really gone, so a failed storage delete can still be swept later instead of orphaning the file.
   const { data: updated, error: updateError } = await db().from("access_requests").update({
     status: decision === "approve" ? "approved" : "rejected",
     grant_token: grantToken,
     decided_at: new Date(now).toISOString(),
     expires_at: new Date(now + PICKUP_TTL_MS).toISOString(),
-    // retention policy: personal and payment data are removed at decision time
     name: null,
     amount_paid: null,
     utr: null,
     invite_code: null,
-    screenshot_path: null,
+    duplicate_utr: false,
   }).eq("id", id).eq("status", "pending").select("id");
   if (updateError) throw new Error(updateError.message);
   if (!updated?.length) {
@@ -178,7 +182,14 @@ async function decide(req: Request, id: string, adminId: string): Promise<Respon
     return fail(409, "This request was already handled.");
   }
 
-  if (request.screenshot_path) await db().storage.from(SCREENSHOT_BUCKET).remove([request.screenshot_path]);
+  if (request.screenshot_path) {
+    const { error: removeError } = await db().storage.from(SCREENSHOT_BUCKET).remove([request.screenshot_path]);
+    if (removeError) {
+      console.error("screenshot delete failed; it stays referenced for the pickup sweep", removeError.message);
+    } else {
+      await db().from("access_requests").update({ screenshot_path: null }).eq("id", id);
+    }
+  }
   console.log(`request ${id} ${decision}d by admin ${adminId.slice(0, 8)}`);
   return json(200, { ok: true, decision, expiresAt });
 }
