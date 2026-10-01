@@ -61,7 +61,7 @@ internal static class Program
         await controller.StartAsync();
         Say($"start: phase={controller.Phase}");
 
-        await controller.SubmitInvitationAsync("E2E Test User", plan, "PAPAJI500", CancellationToken.None);
+        await controller.SubmitInvitationAsync("E2E Test User", plan, InviteCode(), CancellationToken.None);
         var requestId = new AccessStore(dir).Load().PendingRequestId;
         Say($"SUBMITTED request={requestId} plan={plan.Id} phase={controller.Phase} browsing={controller.Phase.AllowsBrowsing()}");
 
@@ -100,9 +100,33 @@ internal static class Program
         restarted.OnTick();
         await Task.Delay(500);
         Say($"EXPIRED: phase={restarted.Phase} browsing={restarted.Phase.AllowsBrowsing()} grantStored={new AccessStore(dir).Load().Grant is not null} message=\"{restarted.Message}\"");
+        if (restarted.Phase != AccessPhase.NeedsAccess)
+        {
+            Cleanup(dir);
+            return 1;
+        }
+
+        // Optional: after expiry a NEW request is required, and it works like the first one (AXE_E2E_REREQUEST=1).
+        if (Environment.GetEnvironmentVariable("AXE_E2E_REREQUEST") == "1")
+        {
+            await restarted.SubmitInvitationAsync("E2E Test Again", plan, InviteCode(), CancellationToken.None);
+            var again = new AccessStore(dir).Load().PendingRequestId;
+            Say($"RE-REQUEST submitted request={again} phase={restarted.Phase} browsing={restarted.Phase.AllowsBrowsing()}");
+            if (!await WaitForDecisionAsync(restarted, timeout))
+            {
+                Say("FAILED: no decision on the second request before the timeout");
+                return 1;
+            }
+
+            Say($"RE-APPROVED: phase={restarted.Phase} browsing={restarted.Phase.AllowsBrowsing()} remaining={restarted.Remaining:h\\:mm\\:ss}");
+            Say("phases seen: " + string.Join(" > ", phases));
+            Cleanup(dir);
+            return restarted.Phase == AccessPhase.Active ? 0 : 1;
+        }
+
         Say("phases seen: " + string.Join(" > ", phases));
         Cleanup(dir);
-        return restarted.Phase == AccessPhase.NeedsAccess ? 0 : 1;
+        return 0;
     }
 
     private static async Task<int> RejectAsync(string planId, TimeSpan timeout)
@@ -113,7 +137,7 @@ internal static class Program
         using var controller = Create(dir, phases);
 
         await controller.StartAsync();
-        await controller.SubmitInvitationAsync("E2E Test Reject", plan, "PAPAJI500", CancellationToken.None);
+        await controller.SubmitInvitationAsync("E2E Test Reject", plan, InviteCode(), CancellationToken.None);
         var requestId = new AccessStore(dir).Load().PendingRequestId;
         Say($"SUBMITTED request={requestId} plan={plan.Id} phase={controller.Phase} browsing={controller.Phase.AllowsBrowsing()}");
 
@@ -157,8 +181,42 @@ internal static class Program
         return controller;
     }
 
+    /// <summary>The LOCAL backend's invitation code: AXE_E2E_INVITE_CODE, else the first code in the dev backend's .env.</summary>
+    private static string InviteCode()
+    {
+        var fromEnv = Environment.GetEnvironmentVariable("AXE_E2E_INVITE_CODE");
+        var codeFile = Environment.GetEnvironmentVariable("AXE_E2E_INVITE_CODE_FILE");
+        if (string.IsNullOrWhiteSpace(fromEnv) && !string.IsNullOrWhiteSpace(codeFile) && File.Exists(codeFile))
+        {
+            fromEnv = File.ReadAllText(codeFile);
+        }
+
+        if (!string.IsNullOrWhiteSpace(fromEnv))
+        {
+            return fromEnv.Trim();
+        }
+
+        var json = FindServerJson();
+        var dev = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(json))!, "backend", "supabase", "functions", ".env");
+        foreach (var line in File.Exists(dev) ? File.ReadAllLines(dev) : Array.Empty<string>())
+        {
+            if (line.StartsWith("AXE_INVITE_CODES=", StringComparison.Ordinal))
+            {
+                return line["AXE_INVITE_CODES=".Length..].Split(',')[0].Trim();
+            }
+        }
+
+        throw new InvalidOperationException("Set AXE_E2E_INVITE_CODE (an invitation code of the local backend).");
+    }
+
     private static string FindServerJson()
     {
+        var overridePath = Environment.GetEnvironmentVariable("AXE_E2E_SERVER_JSON");
+        if (!string.IsNullOrWhiteSpace(overridePath))
+        {
+            return File.Exists(overridePath) ? overridePath : throw new FileNotFoundException("AXE_E2E_SERVER_JSON points to a missing file.");
+        }
+
         for (var d = new DirectoryInfo(AppContext.BaseDirectory); d is not null; d = d.Parent)
         {
             var candidate = Path.Combine(d.FullName, "config", "server.json");

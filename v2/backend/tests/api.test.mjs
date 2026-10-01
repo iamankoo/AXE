@@ -17,10 +17,14 @@ import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deflateSync } from "node:zlib";
+import { device, proofForGrant, withDeviceKey } from "./device-helper.mjs";
+import { retrySync } from "./net-helper.mjs";
 
 const v2 = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const config = JSON.parse(readFileSync(join(v2, "config", "server.json"), "utf8"));
 const admin = JSON.parse(readFileSync(join(v2, "secrets", "local-admin.json"), "utf8"));
+// The invitation code comes from the local backend configuration (git-ignored .env); no code is hard-coded in tests.
+const INVITE = readFileSync(join(v2, "backend", "supabase", "functions", ".env"), "utf8").match(/^AXE_INVITE_CODES=(.*)$/m)[1].split(",")[0].trim();
 const base = `${config.functionsUrl}/access`;
 const adminBase = `${config.functionsUrl}/admin`;
 const publicKey = createPublicKey({ key: Buffer.from(config.signingPublicKey, "base64"), format: "der", type: "spki" });
@@ -29,7 +33,7 @@ let sink;
 let adminToken;
 
 const headers = { apikey: config.anonKey, Authorization: `Bearer ${config.anonKey}`, "Content-Type": "application/json" };
-const device = () => createHash("sha256").update(randomBytes(32)).digest("hex");
+// device() comes from device-helper.mjs: every simulated installation has its own ECDSA key pair.
 const nonce = () => randomBytes(18).toString("base64url");
 
 /** A valid 1×1 PNG built in memory (synthetic test screenshot). */
@@ -60,8 +64,11 @@ function verified(token, typ) {
   return claims;
 }
 
+/** A fresh "client address" per call (the platform-provided header), so per-network rate limits treat each call as its own client. */
+const freshClient = () => ({ "cf-connecting-ip": `10.${randomBytes(1)[0]}.${randomBytes(1)[0]}.${randomBytes(1)[0]}` });
+
 async function call(method, url, body, extra = {}) {
-  const res = await fetch(url, { method, headers: { ...headers, ...extra }, body: body ? JSON.stringify(body) : undefined });
+  const res = await fetch(url, { method, headers: { ...headers, ...freshClient(), ...extra }, body: body ? JSON.stringify(withDeviceKey(url, method, body)) : undefined });
   const text = await res.text();
   return { status: res.status, body: text ? JSON.parse(text) : null };
 }
@@ -80,7 +87,7 @@ async function poll(requestId, pollToken) {
 
 async function session(grant) {
   const n = nonce();
-  const res = await call("POST", `${base}/session`, { grant, nonce: n });
+  const res = await call("POST", `${base}/session`, { grant, nonce: n, proof: proofForGrant(grant, n) });
   assert.equal(res.status, 200);
   const claims = verified(res.body.token, "axe-session");
   assert.equal(claims.nonce, n);
@@ -128,7 +135,7 @@ test("invalid invitation codes are rejected by the server", async () => {
 
 test("valid invitation still needs manual approval; approval starts the timer on the server clock", async () => {
   const dev = device();
-  const submitted = await call("POST", `${base}/requests`, { kind: "invite", name: "Test Invitee", plan: "5h", code: "papaji500", device: dev });
+  const submitted = await call("POST", `${base}/requests`, { kind: "invite", name: "Test Invitee", plan: "5h", code: INVITE.toLowerCase(), device: dev });
   assert.equal(submitted.status, 201, JSON.stringify(submitted.body));
   const { requestId, pollToken } = submitted.body;
 
@@ -136,7 +143,7 @@ test("valid invitation still needs manual approval; approval starts the timer on
   assert.equal(push.title, "AXE Admin");
   assert.equal(push.body, "New invitation request received. Tap to review.");
   assert.deepEqual(push.data, { type: "new_request", requestId });
-  assert.doesNotMatch(JSON.stringify(push), /Test Invitee|PAPAJI500|5 Hours/, "the notification carries no request details");
+  assert.doesNotMatch(JSON.stringify(push), new RegExp(`Test Invitee|${INVITE}|5 Hours`), "the notification carries no request details");
 
   assert.equal((await poll(requestId, pollToken)).status, "pending", "a matching code alone grants nothing");
 
@@ -224,7 +231,7 @@ test("rejection grants nothing", async () => {
 });
 
 test("tampered, forged and revoked grants are refused", async () => {
-  const submitted = await call("POST", `${base}/requests`, { kind: "invite", name: "Test Tamper", plan: "1h", code: "PAPAJI500", device: device() });
+  const submitted = await call("POST", `${base}/requests`, { kind: "invite", name: "Test Tamper", plan: "1h", code: INVITE, device: device() });
   const { requestId, pollToken } = submitted.body;
   await adminCall("POST", `/requests/${requestId}/decision`, { decision: "approve" });
   const grant = (await poll(requestId, pollToken)).grant;
@@ -266,7 +273,7 @@ test("input validation", async () => {
     screenshot: { type: "image/png", data: Buffer.from("not an image at all").toString("base64") } }), 400);
   assert.equal(await bad({ kind: "payment", name: "Test", plan: "1h", amountPaid: 149, utr: "!!", device: device(),
     screenshot: { type: "image/png", data: testPng().toString("base64") } }), 400);
-  assert.equal(await bad({ kind: "invite", name: "Test", plan: "1h", code: "PAPAJI500", device: "not-a-device" }), 400);
+  assert.equal(await bad({ kind: "invite", name: "Test", plan: "1h", code: INVITE, device: "not-a-device" }), 400);
 });
 
 // ---------------------------------------------------------------------------------------------------
@@ -278,9 +285,9 @@ test("input validation", async () => {
 let serviceCtx;
 function service() {
   if (!serviceCtx) {
-    const st = JSON.parse(execFileSync("npx", ["--yes", "supabase", "status", "-o", "json"], {
+    const st = JSON.parse(retrySync(() => execFileSync("npx", ["--yes", "supabase", "status", "-o", "json"], {
       cwd: join(v2, "backend"), encoding: "utf8", shell: true, stdio: ["ignore", "pipe", "ignore"],
-    }));
+    })));
     serviceCtx = { url: st.API_URL, key: st.SERVICE_ROLE_KEY };
   }
   return serviceCtx;
@@ -314,7 +321,7 @@ async function submitPayment(name) {
 }
 
 async function submitInvite(name) {
-  const res = await call("POST", `${base}/requests`, { kind: "invite", name, plan: "1h", code: "PAPAJI500", device: device() });
+  const res = await call("POST", `${base}/requests`, { kind: "invite", name, plan: "1h", code: INVITE, device: device() });
   assert.equal(res.status, 201, JSON.stringify(res.body));
   return res.body;
 }
@@ -402,7 +409,7 @@ test("lifecycle: rejection clears all request data, delivers the rejection, then
 test("lifecycle: invitation requests follow the same lifecycle", async () => {
   const { requestId, pollToken } = await submitInvite("Test Lifecycle Invite");
   const [pending] = await rows("access_requests", `id=eq.${requestId}`);
-  assert.equal(pending.invite_code, "PAPAJI500");
+  assert.equal(pending.invite_code, INVITE);
 
   assert.equal((await adminCall("POST", `/requests/${requestId}/decision`, { decision: "approve" })).status, 200);
   const [stub] = await rows("access_requests", `id=eq.${requestId}`);
@@ -500,7 +507,7 @@ async function patchRows(table, filter, values) {
 }
 
 async function submitInviteFor(plan, dev = device()) {
-  const res = await call("POST", `${base}/requests`, { kind: "invite", name: `Test Plan ${plan}`, plan, code: "PAPAJI500", device: dev });
+  const res = await call("POST", `${base}/requests`, { kind: "invite", name: `Test Plan ${plan}`, plan, code: INVITE, device: dev });
   assert.equal(res.status, 201, JSON.stringify(res.body));
   return { ...res.body, dev };
 }

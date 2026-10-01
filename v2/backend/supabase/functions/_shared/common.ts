@@ -2,6 +2,7 @@
 
 import { createClient, type SupabaseClient } from "jsr:@supabase/supabase-js@2";
 import { sha256Hex } from "./crypto.ts";
+import { clientIp, requireSecret } from "./pure.ts";
 
 /** Plans are decided here, on the server; the client's displayed price is never trusted. */
 export const PLANS: Record<string, { label: string; hours: number; price: number }> = {
@@ -61,12 +62,18 @@ export function route(req: Request, fn: string): string[] {
   return at >= 0 ? parts.slice(at + 1) : parts;
 }
 
+/**
+ * The server secret for keyed hashes (invitation codes, payment references, client keys). It MUST be configured: an
+ * unset or short secret would silently make those hashes unkeyed and guessable, so the function fails closed
+ * (the request ends in a generic 500) instead of running with a default.
+ */
+export function hashSecret(): string {
+  return requireSecret("AXE_HASH_SECRET", Deno.env.get("AXE_HASH_SECRET"));
+}
+
 /** Client IP, hashed with a server secret so raw IPs are never stored. */
 export async function clientKey(req: Request): Promise<string> {
-  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
-    || req.headers.get("x-real-ip")
-    || "unknown";
-  return (await sha256Hex(`${Deno.env.get("AXE_HASH_SECRET") ?? ""}|${ip}`)).slice(0, 32);
+  return (await sha256Hex(`${hashSecret()}|${clientIp(req.headers)}`)).slice(0, 32);
 }
 
 /** True when the key exceeded `limit` hits within the window. */

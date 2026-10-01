@@ -136,12 +136,10 @@ public sealed class AccessController : IDisposable
 
         try
         {
-            var session = await _client!.CheckSessionAsync(grant, CancellationToken.None);
+            var session = await _client!.CheckSessionAsync(grant, nonce => _store.SignDeviceProof(nonce, claims.Id), CancellationToken.None);
             if (!session.Valid || session.GrantId != claims.Id)
             {
-                await EndAccessAsync(session.Reason == "revoked"
-                    ? "Your access was ended by the AXE admin."
-                    : "Your access time has ended. Choose a plan to continue.");
+                await EndAccessAsync(EndedMessage(session.Reason));
                 return;
             }
 
@@ -165,7 +163,8 @@ public sealed class AccessController : IDisposable
         byte[] screenshot, string mediaType, CancellationToken ct)
     {
         var device = await Task.Run(_store.DeviceHash, ct);
-        var submitted = await Client.SubmitPaymentAsync(name, plan, amountPaid, reference, screenshot, mediaType, device, ct);
+        var devicePublicKey = await Task.Run(_store.DevicePublicKey, ct);
+        var submitted = await Client.SubmitPaymentAsync(name, plan, amountPaid, reference, screenshot, mediaType, device, devicePublicKey, ct);
         await BeginPendingAsync(submitted);
         Log.Info("Payment verification request submitted.");
     }
@@ -173,7 +172,8 @@ public sealed class AccessController : IDisposable
     public async Task SubmitInvitationAsync(string name, AccessPlan plan, string code, CancellationToken ct)
     {
         var device = await Task.Run(_store.DeviceHash, ct);
-        var submitted = await Client.SubmitInvitationAsync(name, plan, code, device, ct);
+        var devicePublicKey = await Task.Run(_store.DevicePublicKey, ct);
+        var submitted = await Client.SubmitInvitationAsync(name, plan, code, device, devicePublicKey, ct);
         await BeginPendingAsync(submitted);
         Log.Info("Invitation request submitted.");
     }
@@ -423,7 +423,8 @@ public sealed class AccessController : IDisposable
         _lastResync = DateTime.UtcNow;
         try
         {
-            var session = await Client.CheckSessionAsync(_state.Grant, CancellationToken.None);
+            var grantId = _grant.Id;
+            var session = await Client.CheckSessionAsync(_state.Grant, nonce => _store.SignDeviceProof(nonce, grantId), CancellationToken.None);
             if (_grant is null)
             {
                 return;
@@ -431,9 +432,7 @@ public sealed class AccessController : IDisposable
 
             if (!session.Valid)
             {
-                await EndAccessAsync(session.Reason == "revoked"
-                    ? "Your access was ended by the AXE admin."
-                    : "Your access time has ended. Choose a plan to continue.");
+                await EndAccessAsync(EndedMessage(session.Reason));
                 return;
             }
 
@@ -457,6 +456,14 @@ public sealed class AccessController : IDisposable
             _lastResync = DateTime.MinValue; // re-sync on the next tick after the PC wakes
         }
     }
+
+    /// <summary>What the user is told when the server ends or refuses an authorization.</summary>
+    private static string EndedMessage(string? reason) => reason switch
+    {
+        "revoked" => "Your access was ended by the AXE admin.",
+        "device" => "This authorization doesn't belong to this PC. Please request access again.",
+        _ => "Your access time has ended. Choose a plan to continue.",
+    };
 
     /// <summary>Ends access: clears the saved grant and returns to the access screen.</summary>
     private async Task EndAccessAsync(string message)

@@ -46,7 +46,7 @@ if (!jwk) {
 const env = {
   AXE_SIGNING_PRIVATE_JWK: jwk,
   AXE_HASH_SECRET: existing.AXE_HASH_SECRET || randomBytes(32).toString("base64url"),
-  AXE_INVITE_CODES: existing.AXE_INVITE_CODES || "PAPAJI500",
+  AXE_INVITE_CODES: existing.AXE_INVITE_CODES || `DEV${randomBytes(4).toString("hex").toUpperCase()}`,
   AXE_PUSH_TEST_SINK_URL: sink,
   // Local development only: repeated test runs submit many requests. Production keeps the default (10/hour).
   AXE_SUBMIT_LIMIT: "500",

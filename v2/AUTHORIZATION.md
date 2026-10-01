@@ -130,6 +130,16 @@ acknowledgement, at most 15 minutes after its first read, or after 24 hours if n
 history. The one deliberate exception is a 7-day keyed HMAC of each approved UTR in `used_references` (no plaintext),
 used to warn admins about reused references. See `backend/DATA_LIFECYCLE.md`.
 
+## Fail-closed configuration (Phase 5)
+* The Windows client treats an unusable or missing embedded server configuration as "not connected to a server": access stays
+  locked, nothing crashes, and it never falls back to another server. A **Release** build additionally refuses loopback and plain
+  HTTP (only Debug accepts a local server), and the build itself refuses to embed a development `server.json`.
+* The backend refuses to run (generic 500) if `AXE_HASH_SECRET` is unset or short, and cannot sign without
+  `AXE_SIGNING_PRIVATE_JWK`.
+* Invitation codes are limited to 20 attempts per hour per network, counted whether or not the code is right; the client address
+  comes from the platform header (`cf-connecting-ip`), never from the client-controlled first `x-forwarded-for` entry.
+* The server cannot verify device binding itself (the Windows client enforces it); see `PRODUCTION.md` section 9.
+
 ## Known limitations
 * **Real application window:** the WPF window and WebView2 browser were not driven in an end-to-end run. The controller
   (which the window obeys through `AllowsBrowsing`) was exercised against the real backend with a real phone as the admin;

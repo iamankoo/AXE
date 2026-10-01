@@ -15,9 +15,17 @@ class BackendConfigTest {
 
     @Test fun `https is valid`() = assertTrue(BackendConfig("https://abc.supabase.co", "anon").isValid)
 
-    @Test fun `loopback http is valid for local development`() {
-        assertTrue(BackendConfig("http://127.0.0.1:54321", "anon").isValid)
-        assertTrue(BackendConfig("http://localhost:54321", "anon").isValid)
+    @Test fun `loopback http is valid only when the build allows it (debug builds)`() {
+        assertTrue(BackendConfig("http://127.0.0.1:54321", "anon", allowLoopback = true).isValid)
+        assertTrue(BackendConfig("http://localhost:54321", "anon", allowLoopback = true).isValid)
+        assertTrue(BackendConfig("http://10.0.2.2:54321", "anon", allowLoopback = true).isValid)
+    }
+
+    @Test fun `a release build never accepts a loopback or local server, even over https`() {
+        for (url in listOf("http://127.0.0.1:54321", "http://localhost:54321", "https://localhost", "https://127.0.0.1", "http://10.0.2.2:54321")) {
+            assertFalse(url, BackendConfig(url, "anon").isValid)
+            assertFalse(url, BackendConfig(url, "anon", allowLoopback = false).isValid)
+        }
     }
 
     @Test fun `remote cleartext http is not valid`() = assertFalse(BackendConfig("http://abc.supabase.co", "anon").isValid)

@@ -39,7 +39,7 @@ import java.util.concurrent.TimeUnit
 
 /** Manual dependency wiring. No logging interceptor is installed, by design: no traffic is ever logged. */
 class AppContainer(context: Context) {
-    val config = BackendConfig(BuildConfig.SUPABASE_URL, BuildConfig.SUPABASE_ANON_KEY)
+    val config = BackendConfig(BuildConfig.SUPABASE_URL, BuildConfig.SUPABASE_ANON_KEY, allowLoopback = BuildConfig.DEBUG)
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)

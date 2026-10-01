@@ -72,7 +72,7 @@ object Fixtures {
         """"duplicateUtr":false,"createdAt":"2026-09-30T16:20:11.123456+00:00","expiresAt":"2026-10-01T16:20:11.123+00:00"}"""
 
     val invite = """{"id":"$INVITE_ID","kind":"invite","name":"Test Invitee","plan":"1h","planLabel":"1 Hour",""" +
-        """"expectedAmount":149,"amountPaid":null,"amountMismatch":false,"utr":null,"inviteCode":"PAPAJI500",""" +
+        """"expectedAmount":149,"amountPaid":null,"amountMismatch":false,"utr":null,"inviteCode":"TESTCODE01",""" +
         """"duplicateUtr":false,"createdAt":"2026-09-30T16:25:00+00:00","expiresAt":"2026-10-01T16:25:00+00:00"}"""
 
     fun list(vararg items: String) = """{"requests":[${items.joinToString(",")}]}"""

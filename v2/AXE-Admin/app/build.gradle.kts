@@ -70,7 +70,36 @@ if (fbProjectId.isEmpty() || fbAppId.isEmpty() || fbApiKey.isEmpty() || fbSender
         }
     }
 }
+// A RELEASE must never be built with development configuration: it fails closed instead of shipping a local server or
+// placeholder Firebase identifiers. (Debug builds are unaffected.)
+gradle.taskGraph.whenReady {
+    val releaseBuild = allTasks.any { t ->
+        t.path.startsWith(":app:") && (t.name.startsWith("assembleRelease") || t.name.startsWith("bundleRelease") || t.name.startsWith("packageRelease"))
+    }
+    if (releaseBuild) {
+        val problems = buildList {
+            if (!supabaseUrl.startsWith("https://")) add("the Supabase URL is not https (axe.supabaseUrl / ../config/server.json)")
+            if (Regex("(?i)localhost|127\\.0\\.0\\.1|10\\.0\\.2\\.2|host\\.docker\\.internal").containsMatchIn(supabaseUrl)) add("the Supabase URL points at this machine")
+            if (anonKey.isBlank()) add("no Supabase anon key is configured")
+            if (fbProjectId.contains("fake", ignoreCase = true) || fbApiKey.contains("FAKE", ignoreCase = true)) add("the Firebase identifiers are development placeholders")
+        }
+        if (problems.isNotEmpty()) {
+            throw GradleException("Refusing to build a RELEASE with development configuration: " + problems.joinToString("; ") + ". See v2/PRODUCTION.md.")
+        }
+        if (keystoreProps.getProperty("storeFile") == null) {
+            logger.warn("WARNING: no keystore.properties: the release APK will be UNSIGNED and cannot be installed. See v2/PRODUCTION.md.")
+        }
+    }
+}
+
 fun String.asBuildConfigString() = "\"" + replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+// ---- Release signing (optional, secret, never committed) ---------------------------------------
+// keystore.properties (git-ignored) holds: storeFile, storePassword, keyAlias, keyPassword. When it exists the release
+// build is signed with it; when it does not, release builds are UNSIGNED (they cannot be installed) and say so.
+val keystoreProps = Properties().apply {
+    rootProject.file("keystore.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) }
+}
 
 android {
     namespace = "com.axe.admin"
@@ -80,8 +109,8 @@ android {
         applicationId = "com.axe.admin"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0-phase1"
+        versionCode = 2
+        versionName = "2.0.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "SUPABASE_URL", supabaseUrl.asBuildConfigString())
         buildConfigField("String", "SUPABASE_ANON_KEY", anonKey.asBuildConfigString())
@@ -91,8 +120,20 @@ android {
         buildConfigField("String", "FIREBASE_SENDER_ID", fbSenderId.asBuildConfigString())
     }
 
+    signingConfigs {
+        if (keystoreProps.getProperty("storeFile") != null) {
+            create("release") {
+                storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            signingConfigs.findByName("release")?.let { signingConfig = it }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")

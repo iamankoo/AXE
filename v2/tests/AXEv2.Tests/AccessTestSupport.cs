@@ -34,6 +34,12 @@ internal sealed class FakeAccessServer : HttpMessageHandler
     /// <summary>The PC's device hash, as the real server would have received it with the request.</summary>
     public string DeviceHash { get; set; } = new string('a', 64);
 
+    /// <summary>The installation's registered public key (base64 SPKI) the server checks session proofs against.</summary>
+    public string? DevicePublicKey { get; set; }
+
+    /// <summary>Like the real server: a grant is honoured only with a valid proof by the installation's key.</summary>
+    public bool VerifyDeviceProofs { get; set; } = true;
+
     public long Now { get; set; } = StartNow;
 
     // ---- scripted behaviour
@@ -52,6 +58,10 @@ internal sealed class FakeAccessServer : HttpMessageHandler
     public int SessionCalls;
     public int AckCalls;
     public bool? GrantWasStoredWhenAcknowledged;
+    public string? LastSubmittedDevice;
+    public string? LastSubmittedPublicKey;
+    public string? LastProof;
+    public string? LastNonce;
 
     /// <summary>Builds a signed grant like <c>admin/index.ts</c> does at approval.</summary>
     public string Grant(string plan = "5h", string? requestId = null, string? device = null, long? issuedAt = null,
@@ -99,6 +109,9 @@ internal sealed class FakeAccessServer : HttpMessageHandler
         if (method == HttpMethod.Post && path.EndsWith("/access/requests", StringComparison.Ordinal))
         {
             Interlocked.Increment(ref SubmitCalls);
+            var submitted = JsonNode.Parse(request.Content!.ReadAsStringAsync().Result)!;
+            LastSubmittedDevice = submitted["device"]?.GetValue<string>();
+            LastSubmittedPublicKey = submitted["devicePublicKey"]?.GetValue<string>();
             return Json(HttpStatusCode.Created, new { requestId = RequestId, pollToken = PollToken });
         }
 
@@ -180,17 +193,41 @@ internal sealed class FakeAccessServer : HttpMessageHandler
             exp = 0;
         }
 
+        var proof = body["proof"]?.GetValue<string>();
+        LastProof = proof;
+        LastNonce = nonce;
+        var deviceOk = !VerifyDeviceProofs || ProofIsValid(proof, nonce, jti);
+        var valid = SessionValid && deviceOk;
         var token = Sign(new
         {
             typ = "axe-session",
             nonce,
             jti = SessionGrantIdOverride ?? jti,
-            valid = SessionValid,
-            reason = SessionValid ? null : SessionReason ?? "expired",
+            valid,
+            reason = valid ? null : !deviceOk ? "device" : SessionReason ?? "expired",
             now = Now,
             exp,
         });
         return Json(HttpStatusCode.OK, new { token });
+    }
+
+    private bool ProofIsValid(string? proof, string nonce, string jti)
+    {
+        if (proof is null || DevicePublicKey is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            using var key = ECDsa.Create();
+            key.ImportSubjectPublicKeyInfo(Convert.FromBase64String(DevicePublicKey), out _);
+            return key.VerifyData(Encoding.UTF8.GetBytes($"axe-device-proof|{nonce}|{jti}"), Base64Url.Decode(proof), HashAlgorithmName.SHA256);
+        }
+        catch (Exception ex) when (ex is FormatException or CryptographicException or ArgumentException)
+        {
+            return false;
+        }
     }
 
     private static Task<HttpResponseMessage> Json(HttpStatusCode code, object body) =>
@@ -214,6 +251,7 @@ internal sealed class AccessHarness : IDisposable
         Server = server ?? new FakeAccessServer();
         Store = new AccessStore(StoreDirectory);
         Server.DeviceHash = Store.DeviceHash();
+        Server.DevicePublicKey = Store.DevicePublicKey();
         var config = AccessConfig.Parse(JsonSerializer.Serialize(new
         {
             functionsUrl = "https://axe.test/functions/v1",

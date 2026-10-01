@@ -36,7 +36,7 @@ public sealed class AccessClient : IDisposable
     internal SignedToken Verifier => _verifier;
 
     public Task<SubmittedRequest> SubmitPaymentAsync(string name, AccessPlan plan, decimal amountPaid, string reference,
-        byte[] screenshot, string mediaType, string deviceHash, CancellationToken ct) =>
+        byte[] screenshot, string mediaType, string deviceHash, string devicePublicKey, CancellationToken ct) =>
         SubmitAsync(new JsonObject
         {
             ["kind"] = "payment",
@@ -46,9 +46,10 @@ public sealed class AccessClient : IDisposable
             ["utr"] = reference,
             ["screenshot"] = new JsonObject { ["type"] = mediaType, ["data"] = Convert.ToBase64String(screenshot) },
             ["device"] = deviceHash,
+            ["devicePublicKey"] = devicePublicKey,
         }, TimeSpan.FromSeconds(120), ct);
 
-    public Task<SubmittedRequest> SubmitInvitationAsync(string name, AccessPlan plan, string code, string deviceHash, CancellationToken ct) =>
+    public Task<SubmittedRequest> SubmitInvitationAsync(string name, AccessPlan plan, string code, string deviceHash, string devicePublicKey, CancellationToken ct) =>
         SubmitAsync(new JsonObject
         {
             ["kind"] = "invite",
@@ -56,6 +57,7 @@ public sealed class AccessClient : IDisposable
             ["plan"] = plan.Id,
             ["code"] = code,
             ["device"] = deviceHash,
+            ["devicePublicKey"] = devicePublicKey,
         }, TimeSpan.FromSeconds(30), ct);
 
     private async Task<SubmittedRequest> SubmitAsync(JsonObject body, TimeSpan timeout, CancellationToken ct)
@@ -116,13 +118,18 @@ public sealed class AccessClient : IDisposable
     public Task AcknowledgeAsync(string requestId, string pollToken, CancellationToken ct) =>
         CancelAsync(requestId, pollToken, ct);
 
-    /// <summary>Validates a grant with the server and returns the signed, current server time.</summary>
-    public async Task<SessionClaims> CheckSessionAsync(string grant, CancellationToken ct)
+    /// <summary>
+    /// Validates a grant with the server and returns the signed, current server time. <paramref name="proveDevice"/> turns the
+    /// request's fresh nonce into this installation's signature (see <see cref="AccessStore.SignDeviceProof"/>): the server
+    /// accepts the grant only for the installation that holds the matching private key.
+    /// </summary>
+    public async Task<SessionClaims> CheckSessionAsync(string grant, Func<string, string> proveDevice, CancellationToken ct)
     {
         var nonce = NewNonce();
+        var proof = proveDevice(nonce);
         using var response = await SendAsync(() => new HttpRequestMessage(HttpMethod.Post, new Uri(_base, "session"))
         {
-            Content = JsonContent.Create(new JsonObject { ["grant"] = grant, ["nonce"] = nonce }),
+            Content = JsonContent.Create(new JsonObject { ["grant"] = grant, ["nonce"] = nonce, ["proof"] = proof }),
         }, TimeSpan.FromSeconds(20), ct);
         var json = await ReadJsonAsync(response, ct);
         var session = _verifier.Verify<SessionClaims>(json?["token"]?.GetValue<string>(), "axe-session", c => c.Type);

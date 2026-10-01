@@ -8,10 +8,10 @@ import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 import java.util.Locale
 
-private val timeFormat: DateTimeFormatter =
-    DateTimeFormatter.ofLocalizedDateTime(FormatStyle.MEDIUM, FormatStyle.SHORT).withZone(ZoneId.systemDefault())
-
-fun formatTime(instant: Instant?): String = instant?.let(timeFormat::format) ?: "Unknown"
+// Formatters are built per call (cheap) so a change of time zone or language while the app is running is respected.
+fun formatTime(instant: Instant?): String = instant?.let {
+    DateTimeFormatter.ofLocalizedDateTime(FormatStyle.MEDIUM, FormatStyle.SHORT).withZone(ZoneId.systemDefault()).format(it)
+} ?: "Unknown"
 
 /** The Windows client prices plans in rupees (₹); amounts come from the server as numbers. */
 fun formatRupees(amount: Double): String =
@@ -30,10 +30,9 @@ fun formatAge(instant: Instant?, now: Instant = Instant.now()): String {
 }
 
 /** e.g. "5 Feb 2025, 10:32 AM" */
-private val detailTimeFormat: DateTimeFormatter =
-    DateTimeFormatter.ofPattern("d MMM yyyy, h:mm a", Locale.getDefault()).withZone(ZoneId.systemDefault())
-
-fun formatDetailTime(instant: Instant?): String = instant?.let(detailTimeFormat::format) ?: "Unknown"
+fun formatDetailTime(instant: Instant?): String = instant?.let {
+    DateTimeFormatter.ofPattern("d MMM yyyy, h:mm a", Locale.getDefault()).withZone(ZoneId.systemDefault()).format(it)
+} ?: "Unknown"
 
 fun kindLabel(kind: RequestKind): String = when (kind) {
     RequestKind.Payment -> "Payment"

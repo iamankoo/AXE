@@ -12,53 +12,10 @@
 
 import { b64url } from "./crypto.ts";
 import { db } from "./common.ts";
+import { buildMessage, classifyFcmFailure, isLoopbackUrl, noticeContent } from "./pure.ts";
+import type { AdminNotice } from "./pure.ts";
 
-export type RequestKind = "payment" | "invite";
-
-export interface AdminNotice {
-  requestId: string;
-  kind: RequestKind;
-}
-
-/** The exact, minimal content of a new-request notification. */
-export function noticeContent(notice: AdminNotice) {
-  return {
-    title: "AXE Admin",
-    body: notice.kind === "payment"
-      ? "New payment request received. Tap to review."
-      : "New invitation request received. Tap to review.",
-    // The only data the app receives: what happened and which request to go and fetch.
-    data: { type: "new_request", requestId: notice.requestId },
-  };
-}
-
-/** FCM HTTP v1 message for one device token. */
-export function buildMessage(deviceToken: string, notice: AdminNotice) {
-  const { title, body, data } = noticeContent(notice);
-  return {
-    message: {
-      token: deviceToken,
-      notification: { title, body },
-      data,
-      android: {
-        priority: "HIGH",
-        // `tag` makes a repeated notification for the same request replace itself instead of stacking.
-        notification: { channel_id: "axe_requests", tag: notice.requestId },
-      },
-    },
-  };
-}
-
-/**
- * What an FCM error response means for the stored token. Only a response that says THE TOKEN is bad may delete it;
- * payload mistakes, auth problems and outages must never remove working devices.
- */
-export function classifyFcmFailure(status: number, text: string): "stale-token" | "other" {
-  if (status === 404) return "stale-token"; // UNREGISTERED: app uninstalled, data cleared, or token rotated/deleted
-  if (status === 403 && /SENDER_ID_MISMATCH/i.test(text)) return "stale-token"; // token belongs to another project
-  if (status === 400 && /UNREGISTERED|registration token/i.test(text)) return "stale-token"; // malformed / invalid token
-  return "other"; // 400 for a bad payload, 401/403 auth, 429, 5xx: keep the token
-}
+export type { AdminNotice, RequestKind } from "./pure.ts";
 
 interface ServiceAccount {
   project_id: string;
@@ -80,10 +37,7 @@ function serviceAccount(): ServiceAccount | null {
 function endpoint(envName: string, fallback: string): string {
   const value = Deno.env.get(envName);
   if (!value) return fallback;
-  try {
-    const url = new URL(value);
-    if (["localhost", "127.0.0.1", "host.docker.internal"].includes(url.hostname)) return value.replace(/\/$/, "");
-  } catch { /* fall through */ }
+  if (isLoopbackUrl(value)) return value.replace(/\/$/, "");
   console.warn(`${envName} ignored: only loopback URLs are accepted.`);
   return fallback;
 }
@@ -135,7 +89,11 @@ export async function notifyAdmins(notice: AdminNotice): Promise<void> {
     const { data: devices } = await db().from("admin_devices").select("token");
     const tokens = [...new Set((devices ?? []).map((d) => d.token as string))]; // one message per device
 
-    const sink = Deno.env.get("AXE_PUSH_TEST_SINK_URL");
+    // The development sink receives device tokens, so it is honoured only for loopback URLs: a mistakenly set or
+    // tampered production value can never send tokens to an outside host.
+    const sinkValue = Deno.env.get("AXE_PUSH_TEST_SINK_URL");
+    const sink = sinkValue && isLoopbackUrl(sinkValue) ? sinkValue : "";
+    if (sinkValue && !sink) console.warn("AXE_PUSH_TEST_SINK_URL ignored: only loopback URLs are accepted.");
     if (sink) {
       const { title, body, data } = noticeContent(notice);
       await fetch(sink, {

@@ -10,10 +10,11 @@
 
 import { b64urlDecode, hmacHex, randomToken, sha256Hex, timingSafeEqual } from "../_shared/crypto.ts";
 import {
-  background, cleanup, clientKey, db, fail, json, PENDING_TTL_MS, PLANS, rateLimited, RESULT_GRACE_MS, route, SCREENSHOT_BUCKET,
+  background, cleanup, clientKey, db, fail, hashSecret, json, PENDING_TTL_MS, PLANS, rateLimited, RESULT_GRACE_MS, route, SCREENSHOT_BUCKET,
 } from "../_shared/common.ts";
 import { signClaims, verifyClaims } from "../_shared/signing.ts";
 import { notifyAdmins } from "../_shared/push.ts";
+import { parseDevicePublicKey, verifyDeviceProof } from "../_shared/device.ts";
 
 const MAX_BODY = 8 * 1024 * 1024; // 5 MB screenshot as base64 + fields
 const MAX_SCREENSHOT = 5 * 1024 * 1024;
@@ -60,7 +61,7 @@ function sniffImage(bytes: Uint8Array): string | null {
 }
 
 async function validInvitation(code: string): Promise<boolean> {
-  const secret = Deno.env.get("AXE_HASH_SECRET") ?? "";
+  const secret = hashSecret();
   const given = await hmacHex(secret, code);
   const codes = (Deno.env.get("AXE_INVITE_CODES") ?? "").split(",").map((c) => c.trim().toUpperCase()).filter(Boolean);
   let match = false;
@@ -70,6 +71,9 @@ async function validInvitation(code: string): Promise<boolean> {
 
 /** Accepted submissions per hour per network and per PC (AXE_SUBMIT_LIMIT overrides; 10 by default). */
 const SUBMIT_LIMIT = Number(Deno.env.get("AXE_SUBMIT_LIMIT") ?? "") || 10;
+
+/** Invitation-code attempts (right or wrong) per hour per network: makes guessing a code impractical. */
+const INVITE_ATTEMPT_LIMIT = Number(Deno.env.get("AXE_INVITE_ATTEMPT_LIMIT") ?? "") || 20;
 
 async function submit(req: Request): Promise<Response> {
   await cleanup();
@@ -86,6 +90,10 @@ async function submit(req: Request): Promise<Response> {
   if (!plan) return fail(400, "Please choose a plan.");
   if (!DEVICE.test(device)) return fail(400, "This copy of AXE couldn't identify itself. Please reinstall AXE v2.");
 
+  // The installation's own public key: its hash must be the claimed device id, so an id can't be chosen or borrowed.
+  const devicePubkey = await parseDevicePublicKey(body.devicePublicKey, device);
+  if (!devicePubkey) return fail(400, "This copy of AXE couldn't identify itself. Please reinstall AXE v2.");
+
   const pollToken = randomToken();
   const row: Record<string, unknown> = {
     kind,
@@ -93,6 +101,7 @@ async function submit(req: Request): Promise<Response> {
     expected_amount: plan.price,
     name,
     device_hash: device,
+    device_pubkey: devicePubkey,
     poll_token_hash: await sha256Hex(pollToken),
     expires_at: new Date(Date.now() + PENDING_TTL_MS).toISOString(),
   };
@@ -116,7 +125,7 @@ async function submit(req: Request): Promise<Response> {
     if (bytes.length > MAX_SCREENSHOT) return fail(413, "The screenshot is larger than 5 MB.");
     screenshot = { bytes, type };
 
-    const refHash = await hmacHex(Deno.env.get("AXE_HASH_SECRET") ?? "", utr.toUpperCase());
+    const refHash = await hmacHex(hashSecret(), utr.toUpperCase());
     const [{ data: used }, { data: pendingSame }] = await Promise.all([
       db().from("used_references").select("ref_hash").eq("ref_hash", refHash).maybeSingle(),
       db().from("access_requests").select("id").eq("status", "pending").eq("utr", utr).limit(1),
@@ -125,6 +134,11 @@ async function submit(req: Request): Promise<Response> {
     row.utr = utr;
     row.duplicate_utr = !!used || !!pendingSame?.length;
   } else {
+    // Guessing protection comes first: every attempt from a network counts, whether or not the code is right, so a
+    // blocked network learns nothing about which codes exist.
+    if (await rateLimited(`invite:${await clientKey(req)}`, INVITE_ATTEMPT_LIMIT, 3600)) {
+      return fail(429, "Too many invitation attempts from this network. Please wait a while and try again.");
+    }
     const code = typeof body.code === "string" ? body.code.trim().toUpperCase() : "";
     if (!CODE.test(code) || !(await validInvitation(code))) {
       return fail(400, "That invitation code isn't valid.");
@@ -230,6 +244,7 @@ async function status(req: Request, id: string): Promise<Response> {
  * screenshot are deleted at once. Unknown or already-deleted ids answer ok, so acknowledging is idempotent.
  */
 async function cancel(req: Request, id: string): Promise<Response> {
+  if (await rateLimited(`ack:${await clientKey(req)}`, 120, 60)) return fail(429, "Too many requests.");
   const request = await authorizedRequest(req, id);
   if (!request) return json(200, { ok: true }); // already gone
   if (request.screenshot_path) await db().storage.from(SCREENSHOT_BUCKET).remove([request.screenshot_path]);
@@ -249,9 +264,12 @@ async function session(req: Request): Promise<Response> {
   let reason: string | null = "invalid";
   let exp = 0;
   if (grant && UUID.test(grant.jti)) {
-    const { data } = await db().from("access_grants").select("expires_at, revoked_at").eq("jti", grant.jti).maybeSingle();
+    const { data } = await db().from("access_grants").select("expires_at, revoked_at, device_pubkey").eq("jti", grant.jti).maybeSingle();
     exp = grant.exp;
     if (!data) reason = "expired";
+    // Device binding, checked first so a caller who is not the grant's installation learns nothing else about it: the grant
+    // is only valid for the holder of the private key registered with the request, proven by a fresh signature.
+    else if (!data.device_pubkey || !(await verifyDeviceProof(data.device_pubkey, body?.proof, nonce, grant.jti))) reason = "device";
     else if (data.revoked_at) reason = "revoked";
     else if (new Date(data.expires_at).getTime() <= now || grant.exp <= now) reason = "expired";
     else {

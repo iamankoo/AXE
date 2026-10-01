@@ -18,6 +18,8 @@ import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deflateSync } from "node:zlib";
+import { device, proofForGrant, withDeviceKey } from "./device-helper.mjs";
+import { retrySync } from "./net-helper.mjs";
 
 const v2 = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const config = JSON.parse(readFileSync(join(v2, "config", "server.json"), "utf8"));
@@ -28,12 +30,14 @@ const base = `${config.functionsUrl}/access`;
 const adminBase = `${config.functionsUrl}/admin`;
 const headers = { apikey: config.anonKey, Authorization: `Bearer ${config.anonKey}`, "Content-Type": "application/json" };
 
-const device = () => createHash("sha256").update(randomBytes(32)).digest("hex");
+// device() comes from device-helper.mjs: every simulated installation has its own ECDSA key pair.
 const token = (prefix = "t-") => `${prefix}${randomBytes(14).toString("hex")}`; // >= 20 chars like a real FCM token
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+const freshClient = () => ({ "cf-connecting-ip": `10.${randomBytes(1)[0]}.${randomBytes(1)[0]}.${randomBytes(1)[0]}` });
+
 async function call(method, url, body, extra = {}) {
-  const res = await fetch(url, { method, headers: { ...headers, ...extra }, body: body === undefined ? undefined : JSON.stringify(body) });
+  const res = await fetch(url, { method, headers: { ...headers, ...freshClient(), ...extra }, body: body === undefined ? undefined : JSON.stringify(withDeviceKey(url, method, body)) });
   const text = await res.text();
   return { status: res.status, body: text ? JSON.parse(text) : null };
 }
@@ -56,9 +60,9 @@ async function userId(accessToken) {
 let svc;
 function service() {
   if (!svc) {
-    const st = JSON.parse(execFileSync("npx", ["--yes", "supabase", "status", "-o", "json"], {
+    const st = JSON.parse(retrySync(() => execFileSync("npx", ["--yes", "supabase", "status", "-o", "json"], {
       cwd: join(v2, "backend"), encoding: "utf8", shell: true, stdio: ["ignore", "pipe", "ignore"],
-    }));
+    })));
     svc = { url: st.API_URL, key: st.SERVICE_ROLE_KEY };
   }
   return svc;

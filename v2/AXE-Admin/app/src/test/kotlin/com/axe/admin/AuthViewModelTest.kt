@@ -5,7 +5,9 @@ import com.axe.admin.viewmodel.AuthViewModel
 import com.axe.admin.viewmodel.LoginError
 import com.axe.admin.viewmodel.LoginUiState
 import com.axe.admin.repository.LoginFailure
+import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
@@ -27,7 +29,14 @@ class AuthViewModelTest {
         vm = AuthViewModel(h.auth)
     }
 
-    @After fun tearDown() { h.shutdown(); Dispatchers.resetMain() }
+    @After fun tearDown() {
+        // Login/logout run real network work on IO threads. Finish (cancel + join) everything the ViewModel started BEFORE
+        // the test Main dispatcher is reset, otherwise a late coroutine resumes onto a missing Main dispatcher on a worker
+        // thread and the uncaught exception is blamed on whichever test runs next (seen only under CPU load).
+        kotlinx.coroutines.runBlocking { vm.viewModelScope.coroutineContext[kotlinx.coroutines.Job]?.cancelAndJoin() }
+        h.shutdown()
+        Dispatchers.resetMain()
+    }
 
     /** Login runs on a real IO thread (OkHttp), so poll briefly for the outcome. */
     private fun awaitIdle() {

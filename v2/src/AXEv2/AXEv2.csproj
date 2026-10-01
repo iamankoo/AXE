@@ -46,6 +46,21 @@
     <EmbeddedResource Include="$(AxeServerConfig)" LogicalName="AxeV2.server.json" Link="server.json" />
   </ItemGroup>
 
+  <!--
+    A RELEASE build must never embed a development configuration (the default config/server.json written by
+    backend/scripts/setup-local.mjs points at 127.0.0.1). Build releases with the production file:
+      dotnet build -c Release -p:AxeServerConfig=path\to\production-server.json
+    (-p:AxeAllowLocalConfig=true exists only for deliberately testing a Release build against a local backend.)
+  -->
+  <Target Name="AxeRejectDevelopmentConfigInRelease" BeforeTargets="BeforeBuild"
+          Condition="'$(Configuration)' == 'Release' And Exists('$(AxeServerConfig)') And '$(AxeAllowLocalConfig)' != 'true'">
+    <PropertyGroup>
+      <AxeConfigText>$([System.IO.File]::ReadAllText('$(AxeServerConfig)'))</AxeConfigText>
+    </PropertyGroup>
+    <Error Condition="$(AxeConfigText.Contains('127.0.0.1')) Or $(AxeConfigText.Contains('localhost')) Or $(AxeConfigText.Contains('host.docker.internal')) Or $(AxeConfigText.Contains('http://'))"
+           Text="Refusing to build a Release with a development server configuration ($(AxeServerConfig)). Pass -p:AxeServerConfig=&lt;production server.json&gt; (HTTPS only)." />
+  </Target>
+
   <ItemGroup>
     <InternalsVisibleTo Include="AxeV2.Tests" />
   </ItemGroup>

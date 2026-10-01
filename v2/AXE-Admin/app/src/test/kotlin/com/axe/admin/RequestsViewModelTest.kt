@@ -34,7 +34,7 @@ private fun request(id: String, kind: RequestKind = RequestKind.Payment, hasScre
     id = id, kind = kind, name = "Name $id", plan = "5h", planLabel = "5 Hours", expectedAmount = 199.0,
     amountPaid = if (kind == RequestKind.Payment) 199.0 else null, amountMismatch = false,
     utr = if (kind == RequestKind.Payment) "UTR123456" else null,
-    inviteCode = if (kind == RequestKind.Invite) "PAPAJI500" else null,
+    inviteCode = if (kind == RequestKind.Invite) "TESTCODE01" else null,
     duplicateUtr = false, createdAt = Instant.parse("2026-09-30T16:20:11Z"), expiresAt = null, hasScreenshot = hasScreenshot,
 )
 

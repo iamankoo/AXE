@@ -131,6 +131,10 @@ Windows app or any client configuration.
    `AXE_FCM_*` development overrides).
 4. Sign in on the phone (the token is registered), create a request from Windows AXE, and the phone is notified.
 
+To check a real Firebase service account **without a phone**, use `backend/scripts/verify-fcm.mjs` (see `../PRODUCTION.md`
+section 4): it obtains an FCM access token and, given a device token, sends an FCM dry run (`validate_only`). It prints no
+secrets. It has only been run against a local fake server so far.
+
 ### Local development without Firebase
 `node backend/scripts/setup-local.mjs --sink http://host.docker.internal:8799/ --fake-fcm http://host.docker.internal:8798`
 writes a throw-away RSA service account and local endpoints into the git-ignored `.env`. `backend/tests/push.test.mjs`

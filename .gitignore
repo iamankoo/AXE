@@ -491,3 +491,6 @@ installer/redist/
 # Never commit environment files
 .env
 .env.*
+
+artifacts-v2/
+release-v2/

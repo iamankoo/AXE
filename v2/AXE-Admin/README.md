@@ -1,8 +1,10 @@
 # AXE Admin (Android)
 
-The admin client for the AXE v2 backend. **Phases 1-4 of 5 are implemented**: admin sign-in with secure session
-storage, request management (pending list, detail, payment screenshot, approve / reject), and push notifications
-(FCM) for new requests. Production hardening is **not implemented yet** (see [What remains](#what-remains)). The
+The admin client for the AXE v2 backend. **Phases 1-5 are implemented**: admin sign-in with secure session
+storage, request management (pending list, detail, payment screenshot, approve / reject), push notifications (FCM) for new
+requests, and production hardening (release guards and signing, fail-closed configuration, security tests). What was and was not
+validated is in [`../PHASE5_VALIDATION.md`](../PHASE5_VALIDATION.md); deployment is in [`../PRODUCTION.md`](../PRODUCTION.md)
+(real FCM delivery and a production backend are still untested). The
 Windows side of the authorization workflow is documented in [`../AUTHORIZATION.md`](../AUTHORIZATION.md); this app did not
 change for it.
 
@@ -154,16 +156,16 @@ Requires JDK 17+ (Android Studio's JBR works) and the Android SDK (`ANDROID_HOME
 cd v2\AXE-Admin
 $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
 .\gradlew :app:assembleDebug          # app\build\outputs\apk\debug\app-debug.apk
-.\gradlew :app:testDebugUnitTest      # JVM unit tests (134)
+.\gradlew :app:testDebugUnitTest      # JVM unit tests (135)
 .\gradlew :app:lintDebug
-.\gradlew :app:assembleRelease        # minified, UNSIGNED (signing is Phase 5)
+.\gradlew :app:assembleRelease        # minified; signed when keystore.properties exists, otherwise UNSIGNED. Refuses dev/placeholder config
 $env:ANDROID_SERIAL = "<device serial>"; .\gradlew :app:connectedDebugAndroidTest   # Keystore tests on a device (4)
 ```
 
 Backend tests (need the local Supabase stack and `functions serve`, see the header of `backend/tests/api.test.mjs`):
 
 ```powershell
-cd v2\backend; node --test --test-concurrency=1 tests/api.test.mjs tests/push.test.mjs   # 22 + 18 tests (push tests need setup-local.mjs --fake-fcm, see NOTIFICATIONS.md)
+cd v2\backend; node --test --test-concurrency=1 tests/*.test.mjs   # 60 tests: api 22, push 18, security 9, pure 6, verify-fcm 5 (push tests need setup-local.mjs --fake-fcm, see NOTIFICATIONS.md)
 ```
 
 The JVM tests cover the repository and API parsing with backend-shaped JSON (list, detail, screenshot, decisions, all
@@ -200,6 +202,15 @@ registration from Firebase, the foreground `onMessageReceived` path on a device,
 "Allow" branch of the system permission dialog. Those are covered by JVM tests of the logic and by backend tests against a
 fake FCM server only.
 
+## Release configuration (Phase 5)
+
+A release build is refused unless the configuration is production-grade: HTTPS, not this machine, and real (non-placeholder)
+Firebase identifiers. Debug builds alone accept a loopback server. Release signing uses a git-ignored `keystore.properties`
+(`storeFile`, `storePassword`, `keyAlias`, `keyPassword`); without it the release APK is unsigned and cannot be installed.
+Steps are in [`../PRODUCTION.md`](../PRODUCTION.md) section 6.
+
 ## What remains
 
-- **Phase 5**: release signing, security/session review, offline polish, integration tests.
+Nothing is left to implement in the 5-phase roadmap. Still to do before production, all needing resources that did not exist:
+a hosted Supabase project, a Firebase project (real push delivery test), a production release keystore, and the pending
+production validation listed in [`../PHASE5_VALIDATION.md`](../PHASE5_VALIDATION.md).

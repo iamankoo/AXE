@@ -17,7 +17,7 @@
 // idempotent, a rotated token replaces its predecessor, and each admin keeps at most MAX_DEVICES_PER_ADMIN tokens (the
 // most recently registered ones), so records cannot accumulate.
 
-import { cleanup, db, fail, json, PICKUP_TTL_MS, PLANS, route, SCREENSHOT_BUCKET } from "../_shared/common.ts";
+import { cleanup, db, fail, hashSecret, json, PICKUP_TTL_MS, PLANS, route, SCREENSHOT_BUCKET } from "../_shared/common.ts";
 import { hmacHex } from "../_shared/crypto.ts";
 import { signClaims } from "../_shared/signing.ts";
 
@@ -126,7 +126,7 @@ async function decide(req: Request, id: string, adminId: string): Promise<Respon
   if (decision !== "approve" && decision !== "reject") return fail(400, "Decision must be approve or reject.");
 
   const { data: request } = await db().from("access_requests")
-    .select("id, kind, status, plan, device_hash, utr, screenshot_path, expires_at").eq("id", id).maybeSingle();
+    .select("id, kind, status, plan, device_hash, device_pubkey, utr, screenshot_path, expires_at").eq("id", id).maybeSingle();
   if (!request || request.status !== "pending" || new Date(request.expires_at).getTime() < Date.now()) {
     return fail(409, "This request was already handled or has expired.");
   }
@@ -154,12 +154,13 @@ async function decide(req: Request, id: string, adminId: string): Promise<Respon
       request_id: id,
       plan: request.plan,
       device_hash: request.device_hash,
+      device_pubkey: request.device_pubkey,
       issued_at: new Date(now).toISOString(),
       expires_at: new Date(expiresAt).toISOString(),
     });
     if (error) throw new Error(error.message);
     if (request.kind === "payment" && request.utr) {
-      const refHash = await hmacHex(Deno.env.get("AXE_HASH_SECRET") ?? "", String(request.utr).toUpperCase());
+      const refHash = await hmacHex(hashSecret(), String(request.utr).toUpperCase());
       await db().from("used_references").upsert({ ref_hash: refHash, used_at: new Date(now).toISOString() });
     }
   }

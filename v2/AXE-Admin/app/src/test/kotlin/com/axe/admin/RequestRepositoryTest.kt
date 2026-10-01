@@ -50,7 +50,7 @@ class RequestRepositoryTest {
 
         val invite = requests[1]
         assertEquals(RequestKind.Invite, invite.kind)
-        assertEquals("PAPAJI500", invite.inviteCode)
+        assertEquals("TESTCODE01", invite.inviteCode)
         assertNull(invite.amountPaid)
         assertNull(invite.utr)
 
@@ -133,7 +133,7 @@ class RequestRepositoryTest {
         val r = h.requests.detail(Fixtures.INVITE_ID).value()
 
         assertEquals(RequestKind.Invite, r.kind)
-        assertEquals("PAPAJI500", r.inviteCode)
+        assertEquals("TESTCODE01", r.inviteCode)
         assertEquals(false, r.hasScreenshot)
     }
 
