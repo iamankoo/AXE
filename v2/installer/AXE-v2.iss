@@ -1,10 +1,10 @@
-; AXE v2 installer - builds release-v2\AXE-v2-Setup.exe (Inno Setup 6)
+﻿; AXE v2 installer - builds release-v2\AXE-v2-Setup.exe (Inno Setup 6)
 ; Separate from AXE v1: its own AppId, install directory, Start Menu entry and data directory. Installing or
 ; uninstalling it never touches v1.
 ; Build with:  powershell -ExecutionPolicy Bypass -File build\build-release-v2.ps1 -ServerConfig <production server.json>
 
 #define AppName        "AXE v2"
-#define AppVersion     "2.0.0"
+#define AppVersion     "2.0.1"
 #define AppPublisher   "Aniket Raj"
 #define AppDescription "Private Floating Browser"
 #define AppExe         "AXE-v2.exe"

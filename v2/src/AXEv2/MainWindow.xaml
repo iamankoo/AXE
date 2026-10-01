@@ -43,7 +43,7 @@
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
 
-                <!-- Brand: AXE v2 / Engineered by Aniket Raj -->
+                <!-- Brand: AXE v2 / AXE - By ARIL Labs -->
                 <StackPanel VerticalAlignment="Center" Margin="14,0,0,0" ToolTipService.IsEnabled="False">
                     <TextBlock FontSize="17" FontWeight="Black" FontFamily="Segoe UI" LineHeight="18"
                                LineStackingStrategy="BlockLineHeight" Foreground="{StaticResource TextBrush}">
@@ -53,8 +53,8 @@
                         <Run Text="AX" /><Run Text="E" Foreground="{StaticResource AccentBrush}" /><Run Text=" v2" FontSize="12" FontWeight="Bold" Foreground="{StaticResource TextMutedBrush}" />
                     </TextBlock>
                     <TextBlock x:Name="CreditText" FontSize="9.5" Margin="0,1,0,0" Foreground="{StaticResource TextMutedBrush}"
-                               AutomationProperties.Name="Engineered by Aniket Raj">
-                        <Run Text="Engineered by" /> <Run Text="Aniket Raj" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}" />
+                               AutomationProperties.Name="AXE - By ARIL Labs">
+                        <Run Text="AXE - By ARIL Labs" />
                     </TextBlock>
                 </StackPanel>
 

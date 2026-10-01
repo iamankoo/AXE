@@ -51,7 +51,7 @@ public sealed class SettingsWindow : WpfWindow
         root.Children.Add(brand);
         var version = Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "1.0.0";
         root.Children.Add(Muted($"Private Floating Browser · v{version}"));
-        root.Children.Add(Muted("Engineered by Aniket Raj", 0));
+        root.Children.Add(Muted("AXE - By ARIL Labs", 0));
 
         root.Children.Add(Label("Start page"));
         _startPage = new TextBox { Text = current.Browser.StartPage, Style = Res<Style>("FieldTextBox") };
