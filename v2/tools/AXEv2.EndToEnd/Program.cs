@@ -29,6 +29,12 @@ internal static class Program
         var timeout = TimeSpan.FromSeconds(args.Length > 2 ? int.Parse(args[2]) : 240);
         var exit = 1;
 
+        if (scenario == "update-negative")
+        {
+            var config = AccessConfig.Parse(File.ReadAllText(FindServerJson()));
+            return UpdateNegative.RunAsync(config.UpdateManifestUrl!, config.ReleasePublicKey!, args.Length > 1 ? args[1] : "2.0.2").GetAwaiter().GetResult();
+        }
+
         var dispatcher = Dispatcher.CurrentDispatcher;
         SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(dispatcher));
         dispatcher.BeginInvoke(new Action(async () =>

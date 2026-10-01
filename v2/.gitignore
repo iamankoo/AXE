@@ -35,3 +35,6 @@ installer/redist/
 
 # The Visual Studio "Debug/" rule in the root .gitignore must not hide the Android debug source set.
 !AXE-Admin/app/src/debug/
+
+# The "release/" build-output rule must not hide the release tooling scripts.
+!tools/release/

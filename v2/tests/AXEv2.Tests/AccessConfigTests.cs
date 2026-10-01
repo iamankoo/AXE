@@ -12,8 +12,16 @@ public class AccessConfigTests
 {
     private const string Key = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEexample";
 
+    private static readonly string ReleaseKey = ReleaseKeyOf();
+
+    private static string ReleaseKeyOf()
+    {
+        using var key = System.Security.Cryptography.ECDsa.Create(System.Security.Cryptography.ECCurve.NamedCurves.nistP256);
+        return Convert.ToBase64String(key.ExportSubjectPublicKeyInfo());
+    }
+
     private static string Json(string functionsUrl = "https://axe.example/functions/v1", string anon = "anon", string key = Key, string? manifest = null) =>
-        System.Text.Json.JsonSerializer.Serialize(new { functionsUrl, anonKey = anon, signingPublicKey = key, updateManifestUrl = manifest });
+        System.Text.Json.JsonSerializer.Serialize(new { functionsUrl, anonKey = anon, signingPublicKey = key, updateManifestUrl = manifest, releasePublicKey = manifest is null ? null : ReleaseKey });
 
     [Fact]
     public void A_complete_https_configuration_is_accepted()

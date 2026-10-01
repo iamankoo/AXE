@@ -50,7 +50,7 @@
                         <TextBlock.Effect>
                             <DropShadowEffect Color="#FF2F7BFF" BlurRadius="14" ShadowDepth="0" Opacity="0.35" />
                         </TextBlock.Effect>
-                        <Run Text="AX" /><Run Text="E" Foreground="{StaticResource AccentBrush}" /><Run Text=" v2" FontSize="12" FontWeight="Bold" Foreground="{StaticResource TextMutedBrush}" />
+                        <Run Text="AX" /><Run Text="E" Foreground="{StaticResource AccentBrush}" /><Run x:Name="VersionRun" Text=" v2" FontSize="12" FontWeight="Bold" Foreground="{StaticResource TextMutedBrush}" />
                     </TextBlock>
                     <TextBlock x:Name="CreditText" FontSize="9.5" Margin="0,1,0,0" Foreground="{StaticResource TextMutedBrush}"
                                AutomationProperties.Name="AXE - By ARIL Labs">

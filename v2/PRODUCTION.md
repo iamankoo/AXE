@@ -174,3 +174,9 @@ service-account key, the Android release keystore, and the public `production-se
    git-ignored), then `./gradlew assembleRelease`; copy `app-release.apk` to `release-v2/AXE-v2-Phone.apk` and record its hash.
    (In `local.properties`, escape `:` as `\:` or lint reports `PropertyEscape`.)
 7. After the release is verified, revoke the Supabase access token.
+
+## 11. In-app updates
+
+AXE v2 updates itself from signed manifests on Cloudflare R2. Architecture, manifest format, signing/verification, the R2 layout,
+the release procedure, rollback/recovery and mandatory updates are documented in `UPDATES.md`. The release key, the R2 token and
+the client config (`production-server.json`) live in the secrets folder outside the repository.

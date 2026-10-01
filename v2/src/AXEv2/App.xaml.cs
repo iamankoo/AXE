@@ -56,6 +56,7 @@ public partial class App
             Dispatcher.BeginInvoke(() => window.RestoreFromExternalRequest()));
 
         window.Show();
+        Updates.UpdateCoordinator.StartBackgroundCheck(window);
     }
 
     private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)

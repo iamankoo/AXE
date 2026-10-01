@@ -122,3 +122,22 @@ A rebuild produces a different hash; always record the hash of the file you dist
 **Production deployment, Firebase/FCM delivery, Windows <-> Supabase <-> phone approve/reject, device-bound grants and the release
 artifacts: done and verified as listed. Items marked NOT TESTED or USER-REPORTED above remain open or unverified by the build
 session**, so this report does not claim every mandatory validation was independently performed.
+
+## Addendum: in-app updater (separate feature, explicitly approved after Phase 5)
+
+Documented in `UPDATES.md`. Results:
+
+| Item | Status |
+| --- | --- |
+| Windows unit tests | **PASS 259/259** (Debug and Release); 73 new updater/config tests exercise the real `UpdateService` with real ECDSA signatures |
+| R2 bucket `axe-v2-updates` with public HTTPS URL, immutable release layout | **PASS** (installer and manifest verified through the public URL before the pointer moves) |
+| Negative tests against the live R2 endpoint (real updater, real release key) | **PASS 16/16**: bad signature, tampered payload, malformed, unsigned JSON, http download URL, wrong product, older version (never offered), missing fields, missing sha256, other host, missing manifest (Unavailable), **modified installer with unchanged manifest**, wrong sha256, truncated installer, oversized installer; no installer launched; no files left behind. Interrupted mid-stream downloads are covered by the unit test (a real dropped connection cannot be produced on R2) |
+| Real in-app update 2.0.2 -> 2.0.3 over R2 | **PASS**, observed end to end by script (UI Automation reads and invokes; no mouse/keyboard): check, dialog (current 2.0.2, new 2.0.3 dated 2026-10-01, release notes, Later present), Update now, progress to 100%, SHA-256/size verified, AXE closed, installer ran, AXE relaunched as **2.0.3**, brand shows `AXE v2.0.3`, credit `AXE - By ARIL Labs` |
+| Authorization preserved across the update | **PASS**: an active 10-hour authorization before; after the update `access.dat`, `device.key` and `settings.json` were byte-identical and the browser opened with no access screen |
+| AXE v1 untouched | **PASS**: still installed at 1.0.0 with its own data folder |
+| Mandatory-update UI (Update now / Exit AXE only) and the failure/retry UI on screen | **NOT TESTED visually** (covered by logic in unit tests; the dialog code path is the same) |
+| Per-user vs all-users hand-off (`/ALLUSERS`) | **NOT TESTED** (only the per-user install exists on the test PC) |
+| Update from a clean machine / a second PC | **NOT TESTED** |
+
+Note: the earlier 2.0.1 build contains no updater, so the real update test started from 2.0.2 (updater included, installed once
+manually) and updated to 2.0.3 (a harmless visible change: the brand label shows the exact version).

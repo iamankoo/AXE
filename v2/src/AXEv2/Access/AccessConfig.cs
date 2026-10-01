@@ -64,9 +64,18 @@ public sealed class AccessConfig
             throw new InvalidDataException("Server configuration is incomplete.");
         }
 
-        if (config.UpdateManifestUrl is { Length: > 0 } manifest)
+        // The updater needs BOTH: where the signed manifest lives and the public key that must have signed it.
+        var hasManifest = config.UpdateManifestUrl is { Length: > 0 };
+        var hasReleaseKey = config.ReleasePublicKey is { Length: > 0 };
+        if (hasManifest != hasReleaseKey)
         {
-            RequireSecureUri(manifest, "updateManifestUrl");
+            throw new InvalidDataException("updateManifestUrl and releasePublicKey must be configured together.");
+        }
+
+        if (hasManifest)
+        {
+            RequireSecureUri(config.UpdateManifestUrl!, "updateManifestUrl");
+            _ = Access.SignedToken.FromSpki(config.ReleasePublicKey!); // must be a valid P-256 public key
         }
 
         return config;

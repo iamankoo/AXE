@@ -39,7 +39,12 @@ foreach ($name in 'functionsUrl', 'anonKey', 'signingPublicKey') {
 if ($cfg.functionsUrl -notmatch '^https://' -or $cfg.functionsUrl -match '//(localhost|127\.|10\.0\.2\.2|\[::1\])') {
     throw 'Server config must point to a real HTTPS production endpoint (no http, no localhost).'
 }
-$extra = @($cfg.PSObject.Properties.Name | Where-Object { $_ -notin 'functionsUrl', 'anonKey', 'signingPublicKey' })
+# The updater needs BOTH settings (where the signed manifest lives, and the public key that must have signed it): all HTTPS.
+if ([bool]$cfg.updateManifestUrl -ne [bool]$cfg.releasePublicKey) { throw 'updateManifestUrl and releasePublicKey must be configured together.' }
+if ($cfg.updateManifestUrl -and ($cfg.updateManifestUrl -notmatch '^https://' -or $cfg.updateManifestUrl -match '//(localhost|127\.|10\.0\.2\.2|\[::1\])')) {
+    throw 'updateManifestUrl must be a real HTTPS endpoint.'
+}
+$extra = @($cfg.PSObject.Properties.Name | Where-Object { $_ -notin 'functionsUrl', 'anonKey', 'signingPublicKey', 'updateManifestUrl', 'releasePublicKey' })
 if ($extra.Count -gt 0) { throw "Server config has unexpected fields: $($extra -join ', ')" }
 if ($cfg.anonKey -match 'service_role|sb_secret') { throw 'The server config contains a service key. Only the public anon key may be shipped.' }
 
@@ -102,3 +107,4 @@ Step ("Done: {0} ({1:N1} MB)" -f $setup.FullName, ($setup.Length / 1MB))
 Write-Host "SHA-256  : $hash"
 Write-Host "Signature: $sig  (NotSigned means the installer is NOT code-signed; Windows SmartScreen will warn)"
 Write-Host "Endpoint : $($cfg.functionsUrl)"
+if ($cfg.updateManifestUrl) { Write-Host "Updates  : $($cfg.updateManifestUrl)" }

@@ -17,7 +17,7 @@
     <Copyright>© Aniket Raj</Copyright>
     <!-- The single authoritative AXE v2 version (semantic versioning). The installer, the
          update manifest and the updater's comparison all read it from the built exe. -->
-    <Version>2.0.1</Version>
+    <Version>2.0.3</Version>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <!-- WebView2Loader is statically linked by the WPF control on x64/arm64. -->
     <WebView2LoaderPreference>Static</WebView2LoaderPreference>

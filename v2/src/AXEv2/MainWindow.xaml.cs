@@ -39,6 +39,7 @@ public partial class MainWindow
         _capture = capture;
         InitializeComponent();
 
+        VersionRun.Text = " v" + (typeof(MainWindow).Assembly.GetName().Version?.ToString(3) ?? "2");
         _windowManager = new WindowManager(this);
         _stateManager = new WindowStateManager(this, _windowManager, _capture);
 

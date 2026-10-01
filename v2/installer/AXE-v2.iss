@@ -4,7 +4,7 @@
 ; Build with:  powershell -ExecutionPolicy Bypass -File build\build-release-v2.ps1 -ServerConfig <production server.json>
 
 #define AppName        "AXE v2"
-#define AppVersion     "2.0.1"
+#define AppVersion     "2.0.3"
 #define AppPublisher   "Aniket Raj"
 #define AppDescription "Private Floating Browser"
 #define AppExe         "AXE-v2.exe"
